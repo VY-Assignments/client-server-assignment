@@ -7,6 +7,10 @@
 #include <conio.h>
 //#include <memory>
 #include <format>
+#include <thread>
+#include <fstream>
+#include "json.hpp"
+#include "base64.h"
 
 #pragma comment(lib, "ws2_32.lib")
 using namespace std;
@@ -27,14 +31,46 @@ static void cleanUpResources(const vector<SOCKET> socketsToClose)
 	}
 	WSACleanup();
 }
-/*
+
+enum class Command : int
+{
+	kGet = 0,
+	kList,
+	kPut,
+	kDelete,
+	kInfo,
+	kDefault
+
+};
+
+enum class StatusCode : int 
+{
+	kStatusOK = 200,
+	kStatusNotFound = 404,
+	kStatusCreated = 201, 
+	kStatusFailure = 500
+};
+
+struct JsonFields 
+{
+	const string kMessage		= "message";
+	const string kStatusCode	= "statusCode";
+	const string kTransferPort  = "transferPort";
+	const string kCommand		= "command";
+	const string kArgument		= "argument";
+	const string kVersion		= "version";
+	const string kUniqueID		= "uniqueID";
+	const string kFileSize		= "fileSize";
+};
+
+
 class ClientTcp
 {
 public:
 
 	static optional<shared_ptr<ClientTcp>> initClient()
 	{
-		int result;
+		int result = 0;
 		if (!isLibLoaded)
 		{
 			result = WSAStartup(MAKEWORD(2, 2), &wsaData);
@@ -47,28 +83,30 @@ public:
 
 		isLibLoaded = true;
 		
-		return make_shared<ClientTcp>();
+		return shared_ptr<ClientTcp>(new ClientTcp);
 	}
 	
 	bool initSocket() noexcept
 	{
-		clientSocket = socket(AF_INET, SOCK_STREAM, 0);
+		clientControlSocket = socket(AF_INET, SOCK_STREAM, 0);
+		clientTransferSocket = socket(AF_INET, SOCK_STREAM, 0);
 
-		if (clientSocket == INVALID_SOCKET)
+		if (clientControlSocket == INVALID_SOCKET || clientTransferSocket == INVALID_SOCKET)
 		{
+			cerr << format("Error ar {}, could not init sockets\n", __func__);
 			return false;
 		}
 		return true;
 	}
 	
-	bool tryConnectToServer(const int serverPort, const PCWSTR serverIP) noexcept
+	bool tryConnectToServer(const int serverControlPort, const PCWSTR serverIP) noexcept  // extend it so it would also init the additional server socket
 	{
 		if (isConnected)
 		{
 			cerr << format("Error at {}, could not connect, already connected\n", __func__);
 			return false;
 		}
-		if (clientSocket == INVALID_SOCKET && !initSocket())
+		if (clientControlSocket == INVALID_SOCKET && !initSocket())
 		{
 			cerr << format("Error ar {}, could not init socket object, error: {}\n", __func__, WSAGetLastError());
 			return false;	
@@ -76,13 +114,14 @@ public:
 
 
 		serverAddr.sin_family = AF_INET;
-		serverAddr.sin_port = htons(serverPort);
+		serverAddr.sin_port = htons(serverControlPort);
 		InetPton(AF_INET, serverIP, &serverAddr.sin_addr);
 
-		if (connect(clientSocket, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR)
+		if (connect(clientControlSocket, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR)
 		{
 			cerr << format("Error at {}, connection failed with error: {}\n", __func__, WSAGetLastError());
 			isConnected = false;
+			dropAllConnections();
 			return false;
 		}
 
@@ -92,8 +131,19 @@ public:
 		{
 			cerr << format("Error at {}, server does not follow handshake\n", __func__);
 			isConnected = false;
+			dropAllConnections();
+			return false;
 		}
-		wcout << format(L"SUCCESS, connected to {}:{}\n", serverIP, serverPort);
+
+		if (!tryConnectToTransferPort())
+		{
+			cerr << format("Error at {}, could not connect to transfer port #{}\n", __func__, serverTransferPort);
+			isConnected = false;
+			dropAllConnections();
+			return false;
+		}
+
+		wcout << format(L"SUCCESS, connected to {}:{},{}\n", serverIP, serverControlPort, serverTransferPort);
 		isConnected = true;
 		
 		return true;
@@ -106,75 +156,410 @@ public:
 			cerr << format("Error ar {}, hand shake failed, try to connect first\n", __func__);
 			return false;
 		}
+		
 		int bytesReceived = 0;
+		
 		char buffer[1024];
-		string response;
+		memset(buffer, 0, sizeof(buffer));
 
+		nlohmann::json responseJson, requestJson = clientJsonTemplate;
+		requestJson[jsFields.kMessage] = kClientHandShakePhrase;
+		requestJson[jsFields.kVersion] = kClientVersion;
+
+		string responseStr, requestStrBase64 = encodeJsonToBase64(requestJson);
+		
 		for (int index = 0; index < 2; index++)
 		{
-			bytesReceived = recv(clientSocket, buffer, sizeof(buffer) - 1, 0) > 0;
+			bytesReceived = recv(clientControlSocket, buffer, sizeof(buffer) - 1, 0) > 0;
 			
 			if (bytesReceived == 0)
 			{
+				dropAllConnections();
 				return false;
 			}
 			buffer[bytesReceived] = '\0';
-
-			response = buffer;
+			responseStr = base64_decode(buffer);
+			responseStr = responseStr.substr(0, responseStr.find(kCommandDelimiter));
+			
+			responseJson = nlohmann::json::parse(responseStr);
 
 			if (index == 0) 
 			{
-				if (response != SERVER_HANDSHAKE_PHRASE)
+				if (!responseJson.contains(jsFields.kMessage) || 
+					!responseJson.contains(jsFields.kStatusCode) ||
+					responseJson[jsFields.kMessage] != kServerConfirmationPhrase)
 				{
-					return false;
-				}
-				send(clientSocket, CLIENT_HANDSHAKE_PHRASE.c_str(), (int)CLIENT_HANDSHAKE_PHRASE.size(), 0);
-			}
-			else if (index == 1)
-			{
-				if (response != "OK")
-				{
+					cerr << format("Error at {}, wrong response\n", __func__);
 					return false;
 				}
 				
+				send(clientControlSocket, requestStrBase64.c_str(), (int)requestStrBase64.size(), 0);
+			}
+			else if (index == 1)
+			{
+				if (!responseJson.contains(jsFields.kStatusCode) || 
+					!responseJson.contains(jsFields.kTransferPort) || 
+					!responseJson.contains(jsFields.kUniqueID) ||
+					responseJson[jsFields.kStatusCode] != StatusCode::kStatusOK)
+				{
+					cerr << format("Error at{}, status code was {}\n", __func__, responseJson.value(jsFields.kStatusCode, "Unknown"));
+					return false;
+				}
 			}
 		}
-		
+
+		serverTransferPort = responseJson[jsFields.kTransferPort];
+		clientID = responseJson[jsFields.kUniqueID];
+
 		return true;
 	}
-	
+
+	bool tryConnectToTransferPort()
+	{
+		short retryCounter = 0, bytesReceived = 0; 
+
+		char buffer[1024];
+		memset(buffer, 0, sizeof(buffer));
+		
+		nlohmann::json responseJson, requestJson = clientJsonTemplate;
+		requestJson[jsFields.kUniqueID] = clientID;
+
+		serverAddr.sin_port = htons(serverTransferPort);
+		InetPton(AF_INET, serverIP, &serverAddr.sin_addr);
+
+		while (connect(clientControlSocket, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR && retryCounter <= kMaxRetryCounter)
+		{
+			cerr << format("Error at {}, connection to transfer port failed with error: {}\nRetrying...", __func__, WSAGetLastError());
+			this_thread::sleep_for(100ms);	
+			retryCounter++;
+			if (retryCounter == kMaxRetryCounter)
+			{
+				return false;
+			}
+		}
+
+		send(clientTransferSocket, requestJson.dump().c_str(), requestJson.dump().size(), 0);
+		bytesReceived = recv(clientTransferSocket, buffer, (int)sizeof(buffer) - 1, 0);
+
+		if(bytesReceived == 0)
+		{
+			cerr << format("Error at {}, received 0 bytes, closing connection\n", __func__);
+			dropAllConnections();
+			return false;
+		}
+		
+		buffer[bytesReceived] = '\0';
+		responseJson = nlohmann::json::parse(base64_decode(buffer));
+		
+		if (responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure) != StatusCode::kStatusOK)
+		{
+			cerr << format("Error ar {}, the status code was {}", __func__, responseJson.value(jsFields.kStatusCode, "Unknown"));
+			return false;
+		}
+
+		return true;
+	}
+
+	bool getFile(string fileName)
+	{
+		if (!isConnected)
+		{
+			cerr << format("Error at {}, server is not connected\n", __func__);
+			dropAllConnections();
+			return false;
+		}
+		if (fileName.size() > kMaxFileNameSize || fileName.size() < kMinFileNameSize)
+		{
+			cerr << format("Error at {}, filename of a wrong lenght\n", __func__);
+			return false;
+		}
+
+		char buffer[1024];
+		memset(buffer, 0, sizeof(buffer));
+
+		nlohmann::json responseJson, requestJson = clientJsonTemplate;
+		int bytesReceived = 0;
+
+		requestJson[jsFields.kCommand] = Command::kGet;
+		requestJson[jsFields.kArgument] = fileName;
+		requestJson[jsFields.kUniqueID] = clientID;
+
+		string requestBase64 = encodeJsonToBase64(requestJson);
+
+		send(clientControlSocket, requestBase64.c_str(), requestBase64.size(), 0);
+		
+		bytesReceived = recv(clientControlSocket, buffer, sizeof(buffer) - 1, 0);
+
+		if (bytesReceived == 0)
+		{
+			cerr << format("Error at {}, server dropped connection, dropping connection\n", __func__);
+			dropAllConnections();
+			return false;
+		}
+		
+		responseJson = nlohmann::json::parse(base64_decode(buffer));
+		if (!responseJson.contains(jsFields.kStatusCode) || !responseJson.contains(jsFields.kFileSize))
+		{
+			cerr << format("Error at {}, status code or file size is Unknown\n", __func__);
+			return false;
+		}
+		switch (responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure))
+		{
+		case StatusCode::kStatusNotFound:
+			cerr << format("Error at {}, file not found {}", __func__, responseJson[jsFields.kStatusCode]);
+			return false;
+		case StatusCode::kStatusFailure:
+			cerr << format("Error at {}, server error {}", __func__, responseJson[jsFields.kStatusCode]);
+			return false;
+		case StatusCode::kStatusOK:
+			cout << "Starting transfering\n";
+			break;
+		default: 
+			cerr << format("Error at {}, unexpected status code\n", __func__);
+			return false;
+		}
+
+		acceptFile(fileName, responseJson[jsFields.kFileSize]);
+	}
+
+	bool deleteFileRemote(string fileName) const
+	{
+		if (!isConnected)
+		{
+			cerr << format("Error at {}, server is not connected\n", __func__);
+			dropAllConnections();
+			return false;
+		}
+		if (fileName.size() > kMaxFileNameSize || fileName.size() < kMinFileNameSize)
+		{
+			cerr << format("Error at {}, filename of a wrong length\n", __func__);
+			return false;
+		}
+		int bytesReceived = 0;
+		nlohmann::json responseJson, requestJson = clientJsonTemplate;
+		
+		requestJson[jsFields.kCommand] = Command::kDelete;
+		requestJson[jsFields.kArgument] = fileName;
+		
+		char buffer[1024];
+		memset(buffer, 0, sizeof(buffer));
+
+		bytesReceived = recv(clientControlSocket, buffer, sizeof(buffer) - 1, 0);
+		buffer[bytesReceived] = '\0';
+		
+		if (bytesReceived == 0)
+		{
+			cerr << format("Error at {}, server droppped connection, closing\n", __func__);
+			dropAllConnections();
+			return false;
+		}
+
+		responseJson = nlohmann::json::parse(buffer);
+		if (!responseJson.contains(jsFields.kStatusCode))
+		{
+			cerr << format("Error ar {}, status code Unknown\n", __func__);
+			return false;
+		}
+
+		switch (responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure))
+		{
+		case StatusCode::kStatusOK:
+			cout << format("Deleted successfully\n");
+			return true;
+		case StatusCode::kStatusNotFound:
+			cout << format("File {} not found on server\n", fileName);
+			return false;
+		default:
+			cerr << format("Error at {}, status code was {}\n", __func__, responseJson[jsFields.kStatusCode]);
+			break;
+		}
+
+		return false;
+	}
+
+	bool putFile(string fileName)
+	{
+		ifstream fileToUpload(fileName, ios::binary);
+
+		if (!isConnected)
+		{
+			cerr << format("Error at {}, server is not connected\n", __func__);
+			dropAllConnections();
+			return false;
+		}
+		if (fileName.size() > kMaxFileNameSize || fileName.size() < kMinFileNameSize)
+		{
+			cerr << format("Error at {}, filename of a wrong length\n", __func__);
+			return false;
+		}
+		if (!fileToUpload)
+		{
+			cout << format("Could not open the file {}", fileName);
+			return false;
+		}
+
+		int bytesReceived = 0;
+		nlohmann::json responseJson, requestJson = clientJsonTemplate;
+		
+		char buffer[1024];
+		memset(buffer, 0, sizeof(buffer));
+
+		requestJson[jsFields.kCommand] = Command::kPut;
+		requestJson[jsFields.kArgument] = fileName;
+		requestJson[jsFields.kFileSize] = getFileSize(fileToUpload);
+
+		string encoded = encodeJsonToBase64(requestJson);
+
+		send(clientControlSocket, encoded.c_str(), encoded.size(), 0);
+
+		bytesReceived = recv(clientControlSocket, buffer, sizeof(buffer) - 1, 0);
+		buffer[bytesReceived] = '\0';
+
+		if (bytesReceived == 0)
+		{
+			cerr << format("Error at {}, server disconnected\n", __func__);
+			return false;
+		}
+		
+		responseJson = nlohmann::json::parse(base64_decode(buffer));
+
+		if (!responseJson.contains(jsFields.kStatusCode))
+		{
+			cerr << format("Error at {}, status code was Unknown\n", __func__);
+			return false;
+		}
+
+		switch (responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure))
+		{
+		case StatusCode::kStatusOK:
+			cout << "Start uploading:\n";
+			break;
+		default:
+			cout << "The status code was not OK\n";
+			return false;
+		}
+
+		if (uploadFile(fileToUpload))
+		{
+			cout << format("Succes, file {} uploaded", fileName);
+			return true;
+		}
+		
+		
+		
+	}
 
 	~ClientTcp()
 	{
 		if (isLibLoaded)
 		{
+			dropAllConnections();
 			WSACleanup();
 		}
-		if (clientSocket != INVALID_SOCKET)
-		{
-			closesocket(clientSocket);
-		}
+		
 	}
 private:
 	ClientTcp() {}
+
+	static inline const string encodeJsonToBase64(const nlohmann::json& jsObjectToEncode) 
+	{
+		return base64_encode(jsObjectToEncode.dump());
+	}
+	static inline const nlohmann::json decodeBase64ToJson(const string& strToDecode)
+	{
+		return nlohmann::json::parse(base64_decode(strToDecode));
+	}
+	static inline const size_t getFileSize(ifstream& file)  
+	{
+		streampos current = file.tellg();  
+		file.seekg(0, std::ios::end);           
+		size_t size = file.tellg();             
+		file.seekg(current, std::ios::beg);     
+
+		return size;
+	}
+
+	void dropAllConnections()
+	{
+		closesocket(clientControlSocket);
+		closesocket(clientTransferSocket);
+
+		clientControlSocket = INVALID_SOCKET;
+		clientTransferSocket = INVALID_SOCKET;
+	}
+	bool isConnectionValid() const noexcept
+	{
+		return clientControlSocket != INVALID_SOCKET && clientTransferSocket != INVALID_SOCKET && isConnected;
+	}
+	bool acceptFile(const string& fileName, const int fileSize) const
+	{
+		if (!isConnectionValid())
+		{
+			cerr << format("Error at {}, connection was not valid\n", __func__);
+			return false;
+		}
+		int bytesReceived = 0, totalRealBytesReceived = 0;
+
+		char buffer[2048];
+		ofstream newFile(fileName, ios::binary);
+		
+		while((bytesReceived = recv(clientTransferSocket, buffer, sizeof(buffer) - 1, 0)) && totalRealBytesReceived < fileSize)
+		{
+			string decodedStr = base64_decode(buffer);
+
+			newFile.write(decodedStr.c_str(), decodedStr.size());
+			totalRealBytesReceived += decodedStr.size();
+		}
+		newFile.close();
+
+		return true; 
+	}
+	
+	bool uploadFile(ifstream& file) const
+	{
+		if (!isConnected)
+		{
+			cerr << format("Error at {}, connection was not valid\n", __func__);
+			return false;
+		}
+
+	}
+	
 
 	sockaddr_in serverAddr;
 
 	static inline bool isLibLoaded = false;
 	static inline WSADATA wsaData;
 
-	static inline const string SERVER_HANDSHAKE_PHRASE = "Hello client";
-	static inline const string CLIENT_HANDSHAKE_PHRASE = "Hello server";
-	static inline const string SERVER_CONFIRMATION_PHRASE = "OK";
+	static inline const string kServerHandShakePhrase = "Hello client";
+	static inline const string kClientHandShakePhrase = "Hello server";
+	static inline const string kServerConfirmationPhrase = "OK";
+	static inline const string kCommandDelimiter		 = "||";
+	static inline const int	   kClientVersion			 = 1;
+	static inline const int	   kMaxRetryCounter			 = 4;
+	static inline const int	   kMaxFileNameSize			 = 15;
+	static inline const int    kMinFileNameSize			 = 1;
+
+
+	static inline const JsonFields jsFields;
 	
 	bool isConnected = false;
-	int serverPort;
+	int serverControlPort = 0;
+	int serverTransferPort = 0;
+	int clientID = -1;
 	PCWSTR serverIP;
-	SOCKET clientSocket = INVALID_SOCKET;
-	
 
+	SOCKET clientControlSocket  = INVALID_SOCKET;
+	SOCKET clientTransferSocket = INVALID_SOCKET;
+	
+	const nlohmann::json clientJsonTemplate{
+		{jsFields.kMessage , ""},
+		{jsFields.kCommand, ""},
+		{jsFields.kArgument, ""},
+		{jsFields.kUniqueID, clientID},
+		{jsFields.kVersion, kClientVersion} };
 };
-*/
+
 
 
 /*
@@ -185,6 +570,25 @@ SOCKET clientSocket = INVALID_SOCKET;
 
 int main()
 {
+
+	nlohmann::json jsonObj{ {"message", ""}, {"command", Command::kDefault}};
+	cout << jsonObj.dump() << endl;
+	//string a = jsonObj.dump() + " ";
+	if (jsonObj["command"] == Command::kDelete)  cout << "success" << endl;
+	string a = jsonObj.dump() + "     ";
+	unsigned char command = 0x12;
+	jsonObj["message"] = "hello world abacaba";
+	jsonObj["command"] = "";
+	jsonObj["statusCode"] = 200;
+	nlohmann::json jsobject2 = nlohmann::json::parse(a);
+	cout << jsobject2.dump() << endl;
+	cout << base64_encode(jsonObj.dump()) << " base 64 of the dump " << endl;
+
+	cout << base64_encode(jsonObj) << " base 64 of not dump " << endl;
+	cout << base64_decode(base64_encode(jsonObj.dump(), false)) << endl;
+	_getch();
+	exit(0);
+	
 	// Initialize Winsock
 	WSADATA wsaData;
 	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
@@ -198,9 +602,9 @@ int main()
 
 	int port = 12345;
 	PCWSTR serverIp = L"127.0.0.1";
-	SOCKET clientSocket = socket(AF_INET, SOCK_STREAM, 0);
+	SOCKET clientControlSocket = socket(AF_INET, SOCK_STREAM, 0);
 
-	if (clientSocket == INVALID_SOCKET)
+	if (clientControlSocket == INVALID_SOCKET)
 	{
 		std::cerr << "Error creating socket: " << WSAGetLastError() << std::endl;
 		cleanUpResources({});
@@ -213,28 +617,31 @@ int main()
 	// Connect to the server
 	// can be used to set timeout
 	DWORD timeout = 800; // 5 seconds
-	setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+	setsockopt(clientControlSocket, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
 
-	if (connect(clientSocket, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR)
+	if (connect(clientControlSocket, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR)
 	{
 		std::cerr << "Connect failed with error: " << WSAGetLastError() << std::endl;
-		closesocket(clientSocket);
+		closesocket(clientControlSocket);
 		WSACleanup();
 		return 1;
 	}
 	// Send data to the server
-	const char* message = "Hello, server! How are you?";
-	send(clientSocket, message, (int)strlen(message), 0);
+	for (int counter = 0; counter < 1000; counter ++)
+	{
+		string message = format("Hello, server! How are you? {}", counter);
+		send(clientControlSocket, message.c_str(), (int)message.size(), 0);
+	}
 	// Receive the response from the server
 	char buffer[1024];
 	memset(buffer, 0, 1024);
-	int bytesReceived = recv(clientSocket, buffer, sizeof(buffer), 0);
+	int bytesReceived = recv(clientControlSocket, buffer, sizeof(buffer), 0);
 	if (bytesReceived > 0)
 	{
 		std::cout << "Received from server: " << string(buffer) << std::endl;
 	}
 	// Clean up
-	closesocket(clientSocket);
+	closesocket(clientControlSocket);
 	WSACleanup();
 	return 0;
 }
