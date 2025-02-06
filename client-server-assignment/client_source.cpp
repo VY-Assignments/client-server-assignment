@@ -61,6 +61,7 @@ struct JsonFields
 	const string kVersion		= "version";
 	const string kUniqueID		= "uniqueID";
 	const string kFileSize		= "fileSize";
+	const string kFileNames		= "fileNames";
 };
 
 
@@ -160,16 +161,17 @@ public:
 		int bytesReceived = 0;
 		
 		char buffer[1024];
-		memset(buffer, 0, sizeof(buffer));
+		
 
 		nlohmann::json responseJson, requestJson = clientJsonTemplate;
 		requestJson[jsFields.kMessage] = kClientHandShakePhrase;
 		requestJson[jsFields.kVersion] = kClientVersion;
 
-		string responseStr, requestStrBase64 = encodeJsonToBase64(requestJson);
+		string requestStr = requestJson.dump() + kCommandDelimiter;
 		
 		for (int index = 0; index < 2; index++)
 		{
+			memset(buffer, 0, sizeof(buffer));
 			bytesReceived = recv(clientControlSocket, buffer, sizeof(buffer) - 1, 0) > 0;
 			
 			if (bytesReceived == 0)
@@ -177,11 +179,8 @@ public:
 				dropAllConnections();
 				return false;
 			}
-			buffer[bytesReceived] = '\0';
-			responseStr = base64_decode(buffer);
-			responseStr = responseStr.substr(0, responseStr.find(kCommandDelimiter));
 			
-			responseJson = nlohmann::json::parse(responseStr);
+			responseJson = nlohmann::json::parse(buffer);
 
 			if (index == 0) 
 			{
@@ -193,7 +192,7 @@ public:
 					return false;
 				}
 				
-				send(clientControlSocket, requestStrBase64.c_str(), (int)requestStrBase64.size(), 0);
+				send(clientControlSocket, requestStr.c_str(), (int)requestStr.size(), 0);
 			}
 			else if (index == 1)
 			{
@@ -223,13 +222,14 @@ public:
 		
 		nlohmann::json responseJson, requestJson = clientJsonTemplate;
 		requestJson[jsFields.kUniqueID] = clientID;
+		string responseStr, requestStr = requestJson.dump() + kCommandDelimiter;
 
 		serverAddr.sin_port = htons(serverTransferPort);
 		InetPton(AF_INET, serverIP, &serverAddr.sin_addr);
 
 		while (connect(clientControlSocket, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR && retryCounter <= kMaxRetryCounter)
 		{
-			cerr << format("Error at {}, connection to transfer port failed with error: {}\nRetrying...", __func__, WSAGetLastError());
+			cerr << format("Error at {}, connection to transfer port failed with error: {}, Retrying...\n", __func__, WSAGetLastError());
 			this_thread::sleep_for(100ms);	
 			retryCounter++;
 			if (retryCounter == kMaxRetryCounter)
@@ -238,8 +238,9 @@ public:
 			}
 		}
 
-		send(clientTransferSocket, requestJson.dump().c_str(), requestJson.dump().size(), 0);
-		bytesReceived = recv(clientTransferSocket, buffer, (int)sizeof(buffer) - 1, 0);
+		send(clientTransferSocket, requestStr.c_str(), requestStr.size(), 0);
+
+		bytesReceived = recv(clientTransferSocket, buffer, (int)sizeof(buffer) - 1, 0); 
 
 		if(bytesReceived == 0)
 		{
@@ -248,8 +249,7 @@ public:
 			return false;
 		}
 		
-		buffer[bytesReceived] = '\0';
-		responseJson = nlohmann::json::parse(base64_decode(buffer));
+		responseJson = nlohmann::json::parse(buffer);
 		
 		if (responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure) != StatusCode::kStatusOK)
 		{
@@ -284,9 +284,9 @@ public:
 		requestJson[jsFields.kArgument] = fileName;
 		requestJson[jsFields.kUniqueID] = clientID;
 
-		string requestBase64 = encodeJsonToBase64(requestJson);
+		string requestStr = requestJson.dump() + kCommandDelimiter;
 
-		send(clientControlSocket, requestBase64.c_str(), requestBase64.size(), 0);
+		send(clientControlSocket, requestStr.c_str(), requestStr.size(), 0);
 		
 		bytesReceived = recv(clientControlSocket, buffer, sizeof(buffer) - 1, 0);
 
@@ -297,7 +297,8 @@ public:
 			return false;
 		}
 		
-		responseJson = nlohmann::json::parse(base64_decode(buffer));
+		responseJson = nlohmann::json::parse(buffer);
+
 		if (!responseJson.contains(jsFields.kStatusCode) || !responseJson.contains(jsFields.kFileSize))
 		{
 			cerr << format("Error at {}, status code or file size is Unknown\n", __func__);
@@ -305,24 +306,31 @@ public:
 		}
 		switch (responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure))
 		{
-		case StatusCode::kStatusNotFound:
-			cerr << format("Error at {}, file not found {}", __func__, responseJson[jsFields.kStatusCode]);
-			return false;
-		case StatusCode::kStatusFailure:
-			cerr << format("Error at {}, server error {}", __func__, responseJson[jsFields.kStatusCode]);
-			return false;
 		case StatusCode::kStatusOK:
 			cout << "Starting transfering\n";
 			break;
+		case StatusCode::kStatusNotFound:
+			cerr << format("Error at {}, file not found {}", __func__, string(responseJson[jsFields.kStatusCode]));
+			return false;
+		case StatusCode::kStatusFailure:
+			cerr << format("Error at {}, server error {}", __func__, string(responseJson[jsFields.kStatusCode]));
+			return false;
 		default: 
 			cerr << format("Error at {}, unexpected status code\n", __func__);
 			return false;
 		}
-
-		acceptFile(fileName, responseJson[jsFields.kFileSize]);
+		
+		if (!acceptFile(fileName, responseJson[jsFields.kFileSize]))
+		{
+			cerr << format("Error ar {}, could not accpet the file\n", __func__);
+			return false;
+		}
+		cout << format("Success, file {} accepted\n", fileName);
+		
+		return true;
 	}
 
-	bool deleteFileRemote(string fileName) const
+	bool deleteFileRemote(string fileName) 
 	{
 		if (!isConnected)
 		{
@@ -340,12 +348,15 @@ public:
 		
 		requestJson[jsFields.kCommand] = Command::kDelete;
 		requestJson[jsFields.kArgument] = fileName;
+
+		string requestStr = requestJson.dump() + kCommandDelimiter;
+
+		send(clientControlSocket, requestStr.c_str(), requestStr.size(), 0);
 		
 		char buffer[1024];
 		memset(buffer, 0, sizeof(buffer));
 
 		bytesReceived = recv(clientControlSocket, buffer, sizeof(buffer) - 1, 0);
-		buffer[bytesReceived] = '\0';
 		
 		if (bytesReceived == 0)
 		{
@@ -370,7 +381,7 @@ public:
 			cout << format("File {} not found on server\n", fileName);
 			return false;
 		default:
-			cerr << format("Error at {}, status code was {}\n", __func__, responseJson[jsFields.kStatusCode]);
+			cerr << format("Error at {}, status code was {}\n", __func__, string(responseJson[jsFields.kStatusCode]));
 			break;
 		}
 
@@ -408,12 +419,11 @@ public:
 		requestJson[jsFields.kArgument] = fileName;
 		requestJson[jsFields.kFileSize] = getFileSize(fileToUpload);
 
-		string encoded = encodeJsonToBase64(requestJson);
+		string requestStr = requestJson.dump() + kCommandDelimiter;
 
-		send(clientControlSocket, encoded.c_str(), encoded.size(), 0);
+		send(clientControlSocket, requestStr.c_str(), requestStr.size(), 0);
 
 		bytesReceived = recv(clientControlSocket, buffer, sizeof(buffer) - 1, 0);
-		buffer[bytesReceived] = '\0';
 
 		if (bytesReceived == 0)
 		{
@@ -421,7 +431,7 @@ public:
 			return false;
 		}
 		
-		responseJson = nlohmann::json::parse(base64_decode(buffer));
+		responseJson = nlohmann::json::parse(buffer);
 
 		if (!responseJson.contains(jsFields.kStatusCode))
 		{
@@ -441,12 +451,65 @@ public:
 
 		if (uploadFile(fileToUpload))
 		{
-			cout << format("Succes, file {} uploaded", fileName);
+			cout << format("Success, file {} uploaded\n", fileName);
 			return true;
 		}
+		cout << format("Could not upload the file {}\n", fileName); 
 		
+		return false;
+	}
+
+	bool listCurDir()
+	{
+		if (!isConnected)
+		{
+			cerr << format("Error at {}, server is not connected\n", __func__);
+			dropAllConnections();
+			return false;
+		}
 		
+		nlohmann::json responseJson, requestJson = getClientJsonTemplate();
+		requestJson[jsFields.kCommand] = Command::kList;
+
+		string requestStr = requestJson.dump() + kCommandDelimiter;
+
+		size_t bytesSent = 0, bytesReceived = 0, listSize = 0;
+	
+		char buffer[1024];
+		memset(buffer, 0, sizeof(buffer));
+	
+		bytesSent = send(clientControlSocket, requestStr.c_str(), requestStr.size(), 0);
+
+		bytesReceived = recv(clientControlSocket, buffer, sizeof(buffer) - 1, 0);
+
+		if (bytesReceived == 0 || bytesSent == SOCKET_ERROR)  
+		{
+			cerr << format("Error at {}, server disconnected, last error {}, closing...\n", __func__, WSAGetLastError());
+			dropAllConnections();
+			return false;
+		}
 		
+		responseJson = nlohmann::json::parse(buffer);
+		
+		if (!responseJson.contains(jsFields.kStatusCode) || !responseJson.contains(jsFields.kFileSize))
+		{
+			cerr << format("Error at {}, status code was {}", __func__, responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure));
+			return false;
+		}
+		
+		listSize = responseJson[jsFields.kFileSize];
+		
+		nlohmann::json info = loadDirInfo(listSize);
+
+		printDirList(info);
+
+		return true;
+	}
+
+	bool getFileInfo(const string fileName) 
+	{
+
+		return true;
 	}
 
 	~ClientTcp()
@@ -478,6 +541,52 @@ private:
 
 		return size;
 	}
+	static inline const string getDecodedCommandBeforeDelimiter(const char buffer[])
+	{
+		string decoded = base64_decode(buffer);
+		return decoded.substr(0, decoded.find(kCommandDelimiter));
+	}
+
+	void printDirList(nlohmann::json listJsonIn) 
+	{
+		int counter = 0;
+		for (auto& fileName : listJsonIn[jsFields.kFileNames])
+		{
+			counter++;
+			cout << fileName << "\t";
+			if (counter % 2 == 0)	cout << endl;
+		}
+	}
+
+	nlohmann::json loadDirInfo(const size_t listSize)
+	{
+		if (!isConnected)
+		{
+			cerr << format("Error at {}, server is not connected\n", __func__);
+			dropAllConnections();
+			return nlohmann::json{};
+		}
+		const size_t chunkSize = 1024;
+		
+		char buffer[chunkSize];
+		memset(buffer, 0, sizeof(buffer));
+		
+		int bytesReceived = 0, totalBytesReceived = 0;
+
+		string resultListStr;
+
+		while ((bytesReceived = recv(clientTransferSocket, buffer, sizeof(buffer) - 1, 0)) && totalBytesReceived < static_cast<int>(listSize) && bytesReceived != 0)
+		{
+			resultListStr += buffer;
+			totalBytesReceived += bytesReceived;
+			memset(buffer, 0, sizeof(buffer));
+		}
+		
+		return nlohmann::json::parse(resultListStr);
+	}
+
+	
+
 
 	void dropAllConnections()
 	{
@@ -486,6 +595,8 @@ private:
 
 		clientControlSocket = INVALID_SOCKET;
 		clientTransferSocket = INVALID_SOCKET;
+		
+		isConnected = false;
 	}
 	bool isConnectionValid() const noexcept
 	{
@@ -500,31 +611,61 @@ private:
 		}
 		int bytesReceived = 0, totalRealBytesReceived = 0;
 
-		char buffer[2048];
+		char buffer[1024];
+
 		ofstream newFile(fileName, ios::binary);
 		
-		while((bytesReceived = recv(clientTransferSocket, buffer, sizeof(buffer) - 1, 0)) && totalRealBytesReceived < fileSize)
+		while((bytesReceived = recv(clientTransferSocket, buffer, sizeof(buffer) - 1, 0)) && totalRealBytesReceived < fileSize && bytesReceived != 0)
 		{
-			string decodedStr = base64_decode(buffer);
+			// string decodedStr = base64_decode(buffer);
 
-			newFile.write(decodedStr.c_str(), decodedStr.size());
-			totalRealBytesReceived += decodedStr.size();
+			newFile.write(buffer, bytesReceived);
+			totalRealBytesReceived += bytesReceived;
 		}
 		newFile.close();
 
 		return true; 
 	}
 	
-	bool uploadFile(ifstream& file) const
+	bool uploadFile(ifstream& file)    
 	{
 		if (!isConnected)
 		{
-			cerr << format("Error at {}, connection was not valid\n", __func__);
+			cerr << format("Error at {}, connection was not valid, closing connections\n", __func__);
+			dropAllConnections();
 			return false;
 		}
 
+		const size_t kChunkSize = 1024, kFileSize = getFileSize(file);
+		int bytesRead = 0, totalRealBytesUploaded = 0;
+		
+		char buffer[kChunkSize]; 
+		memset(buffer, 0, sizeof(buffer));
+
+		while (file.read(buffer, kChunkSize) || file.gcount() > 0) 
+		{	
+			bytesRead = file.gcount();  
+			totalRealBytesUploaded += bytesRead;
+			
+			// string encoded = base64_encode(string(buffer, bytesRead));
+
+			send(clientTransferSocket, buffer, bytesRead, 0);   // raw 
+			memset(buffer, 0, sizeof(buffer));
+		}
+
+		return true;
 	}
 	
+	nlohmann::json getClientJsonTemplate() const
+	{
+		return nlohmann::json{
+			{jsFields.kMessage , ""},
+			{jsFields.kCommand, ""},
+			{jsFields.kArgument, ""},
+			{jsFields.kUniqueID, clientID},
+			{jsFields.kVersion, kClientVersion}};
+	}
+
 
 	sockaddr_in serverAddr;
 
@@ -552,12 +693,7 @@ private:
 	SOCKET clientControlSocket  = INVALID_SOCKET;
 	SOCKET clientTransferSocket = INVALID_SOCKET;
 	
-	const nlohmann::json clientJsonTemplate{
-		{jsFields.kMessage , ""},
-		{jsFields.kCommand, ""},
-		{jsFields.kArgument, ""},
-		{jsFields.kUniqueID, clientID},
-		{jsFields.kVersion, kClientVersion} };
+
 };
 
 
@@ -588,7 +724,8 @@ int main()
 	cout << base64_decode(base64_encode(jsonObj.dump(), false)) << endl;
 	_getch();
 	exit(0);
-	
+	*/
+	char buffer[1024];
 	// Initialize Winsock
 	WSADATA wsaData;
 	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
