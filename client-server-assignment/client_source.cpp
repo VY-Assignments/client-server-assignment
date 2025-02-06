@@ -5,7 +5,6 @@
 #include <tuple>
 #include <optional>
 #include <conio.h>
-//#include <memory>
 #include <format>
 #include <thread>
 #include <fstream>
@@ -14,7 +13,6 @@
 
 #pragma comment(lib, "ws2_32.lib")
 using namespace std;
-// using std::vector, std::cout, std::cerr, std::optional, std::nullopt, std::shared_ptr;
 
 static bool isEqual(const int result, const int expected)
 {
@@ -62,6 +60,7 @@ struct JsonFields
 	const string kUniqueID		= "uniqueID";
 	const string kFileSize		= "fileSize";
 	const string kFileNames		= "fileNames";
+	const string kFileInfo		= "fileInfo";
 };
 
 
@@ -163,7 +162,7 @@ public:
 		char buffer[1024];
 		
 
-		nlohmann::json responseJson, requestJson = clientJsonTemplate;
+		nlohmann::json responseJson, requestJson = getClientJsonTemplate();
 		requestJson[jsFields.kMessage] = kClientHandShakePhrase;
 		requestJson[jsFields.kVersion] = kClientVersion;
 
@@ -212,7 +211,7 @@ public:
 
 		return true;
 	}
-
+	 
 	bool tryConnectToTransferPort()
 	{
 		short retryCounter = 0, bytesReceived = 0; 
@@ -220,7 +219,7 @@ public:
 		char buffer[1024];
 		memset(buffer, 0, sizeof(buffer));
 		
-		nlohmann::json responseJson, requestJson = clientJsonTemplate;
+		nlohmann::json responseJson, requestJson = getClientJsonTemplate();
 		requestJson[jsFields.kUniqueID] = clientID;
 		string responseStr, requestStr = requestJson.dump() + kCommandDelimiter;
 
@@ -277,7 +276,7 @@ public:
 		char buffer[1024];
 		memset(buffer, 0, sizeof(buffer));
 
-		nlohmann::json responseJson, requestJson = clientJsonTemplate;
+		nlohmann::json responseJson, requestJson = getClientJsonTemplate();
 		int bytesReceived = 0;
 
 		requestJson[jsFields.kCommand] = Command::kGet;
@@ -344,7 +343,7 @@ public:
 			return false;
 		}
 		int bytesReceived = 0;
-		nlohmann::json responseJson, requestJson = clientJsonTemplate;
+		nlohmann::json responseJson, requestJson = getClientJsonTemplate();
 		
 		requestJson[jsFields.kCommand] = Command::kDelete;
 		requestJson[jsFields.kArgument] = fileName;
@@ -410,7 +409,7 @@ public:
 		}
 
 		int bytesReceived = 0;
-		nlohmann::json responseJson, requestJson = clientJsonTemplate;
+		nlohmann::json responseJson, requestJson = getClientJsonTemplate();
 		
 		char buffer[1024];
 		memset(buffer, 0, sizeof(buffer));
@@ -508,6 +507,45 @@ public:
 
 	bool getFileInfo(const string fileName) 
 	{
+		if (!isConnected)
+		{
+			cerr << format("Error at {}, server is not connected\n", __func__);
+			dropAllConnections();
+			return false;
+		}
+
+		nlohmann::json responseJson, requestJson = getClientJsonTemplate();
+		requestJson[jsFields.kCommand] = Command::kInfo;
+		requestJson[jsFields.kArgument] = fileName;
+
+		string requestStr = requestJson.dump() + kCommandDelimiter;
+
+		size_t bytesSent = 0, bytesReceived = 0, listSize = 0;
+
+		char buffer[1024];
+		memset(buffer, 0, sizeof(buffer));
+
+		bytesSent = send(clientControlSocket, requestStr.c_str(), requestStr.size(), 0);
+
+		bytesReceived = recv(clientControlSocket, buffer, sizeof(buffer) - 1, 0);
+
+		if (bytesReceived == 0 || bytesSent == SOCKET_ERROR)
+		{
+			cerr << format("Error at {}, server disconnected, last error {}, closing...\n", __func__, WSAGetLastError());
+			dropAllConnections();
+			return false;
+		}
+
+		responseJson = nlohmann::json::parse(buffer);
+
+		if (!responseJson.contains(jsFields.kStatusCode) || responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure) != StatusCode::kStatusOK)
+		{
+			cerr << format("Error at {}, status code was {}\n", __func__, responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure));
+			dropAllConnections();
+			return false;
+		}
+
+		printFileInfo(fileName, loadFileInfo());
 
 		return true;
 	}
@@ -547,7 +585,7 @@ private:
 		return decoded.substr(0, decoded.find(kCommandDelimiter));
 	}
 
-	void printDirList(nlohmann::json listJsonIn) 
+	static inline void printDirList(nlohmann::json listJsonIn) 
 	{
 		int counter = 0;
 		for (auto& fileName : listJsonIn[jsFields.kFileNames])
@@ -557,6 +595,40 @@ private:
 			if (counter % 2 == 0)	cout << endl;
 		}
 	}
+	static inline void printFileInfo(const string& fileName, const nlohmann::json& fileInfo)
+	{
+		cout << format("{} {}\n", fileName, fileInfo[jsFields.kFileInfo]);
+	}
+
+	nlohmann::json loadFileInfo()
+	{
+		if (!isConnected)
+		{
+			cerr << format("Error at {}, server is not connected\n", __func__);
+			dropAllConnections();
+			return nlohmann::json{};
+		}
+		const int kChunkSize = 1024;
+
+		char buffer[kChunkSize];
+		memset(buffer, 0, sizeof(buffer));
+
+		nlohmann::json responseJson;
+		string resultStr;
+
+		int bytesReceived = 0, totalBytesReceived = 0;
+
+		bytesReceived = recv(clientTransferSocket, buffer, sizeof(buffer) - 1, 0);
+		if (bytesReceived == 0)
+		{
+			cerr << format("Error at {}, server disconnected, closing\n", __func__);
+			dropAllConnections();
+			return nlohmann::json{};
+		}
+
+		return nlohmann::json::parse(buffer);
+	}
+
 
 	nlohmann::json loadDirInfo(const size_t listSize)
 	{
@@ -683,6 +755,8 @@ private:
 
 
 	static inline const JsonFields jsFields;
+
+
 	
 	bool isConnected = false;
 	int serverControlPort = 0;
@@ -734,7 +808,7 @@ int main()
 		return 1;
 	}
 
-
+	//char buffer[1023];
 	// Client configuration
 
 	int port = 12345;
