@@ -132,7 +132,6 @@
     <ClCompile Include="server_source.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\client-server-assignment\base64.h" />
     <ClInclude Include="..\client-server-assignment\json.hpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
