@@ -17,26 +17,62 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
+
+namespace common
+{
+
+	enum class Command : int
+	{
+		kGet = 0,
+		kList,
+		kPut,
+		kDelete,
+		kInfo,
+		kDefault
+
+	};
+
+	enum class StatusCode : int
+	{
+		kStatusOK = 200,
+		kStatusNotFound = 404,
+		kStatusCreated = 201,
+		kStatusFailure = 500
+	};
+	
+	inline size_t getFileSize(std::ifstream& file)
+	{
+		std::streampos current = file.tellg();
+		file.seekg(0, std::ios::end);
+		size_t size = file.tellg();
+		file.seekg(current, std::ios::beg);
+
+		return size;
+	}
+
+
+}
+
+
 using namespace std;
-
-enum class Command : int
+using namespace common;
+namespace server_utils
 {
-	kGet = 0,
-	kList,
-	kPut,
-	kDelete,
-	kInfo,
-	kDefault
+	struct DefaultJsonFields   
+	{
+		const string			 kMessage	   = "";
+		const common::StatusCode kStatusCode   = StatusCode::kStatusOK;
+		const int				 kTransferPort = -1;
+		const int				 kUniqueID	   = -1;
+		const int				 kFileSize	   = -1;
+		const string			 kFileName	   = "";
+		const string			 kFileInfo	   = "";
+		const string			 kNickname	   = "";
+		const Command			 kCommand	   = Command::kDefault;
+	};
 
-};
-
-enum class StatusCode : int
-{
-	kStatusOK = 200,
-	kStatusNotFound = 404,
-	kStatusCreated = 201,
-	kStatusFailure = 500
-};
+	
+}
 
 struct JsonFields
 {
@@ -75,9 +111,9 @@ class ServerTcp
 		}
 
 		isLibLoaded = true;
-		thisServerPtr = shared_ptr<ServerTcp>(ServerTcp());
+		thisServerPtr = shared_ptr<ServerTcp>(new ServerTcp());
 
-		if (!thisServerPtr->initSockets(controlPort, transferPort))
+		if (!thisServerPtr->initSockets())
 		{
 			thisServerPtr = nullptr;
 			return nullopt;
@@ -86,7 +122,7 @@ class ServerTcp
 		return thisServerPtr;
 	}
 	
-	bool initSockets(const unsigned short controlPort, const unsigned short transferPort)  // got to make private 
+	bool initSockets(/*const unsigned short controlPort, const unsigned short transferPort*/)  // got to make private 
 	{
 		serverControlSocket = socket(AF_INET, SOCK_STREAM, 0);
 		serverTransferSocket = socket(AF_INET, SOCK_STREAM, 0);
@@ -97,8 +133,6 @@ class ServerTcp
 			dropAllConnections();
 			return false;
 		}
-		serverControlPort = controlPort;
-		serverTransferPort = transferPort;
 	}
 
 	bool bindSockets(const unsigned short controlPort, const unsigned short transferPort)
@@ -110,6 +144,9 @@ class ServerTcp
 			return false;
 		}
 
+		serverControlPort = controlPort;
+		serverTransferPort = transferPort;
+
 		serverAddr.sin_port = htons(controlPort);
 
 		int resultControl = ::bind(serverControlSocket, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr));
@@ -117,6 +154,7 @@ class ServerTcp
 		serverAddr.sin_port = htons(transferPort);
 		
 		int resultTransfer = ::bind(serverTransferSocket, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr));
+
 		if (resultControl == SOCKET_ERROR || resultTransfer == SOCKET_ERROR)
 		{
 			cerr << format("Error at {}, bind failed with error: {}\n", __func__, WSAGetLastError());
@@ -129,7 +167,7 @@ class ServerTcp
 
 	bool startListening()
 	{
-		if (mainHandlerThreadPtr == nullptr)
+		if (mainListeningThreadPtr == nullptr)
 		{
 			cout << "Already listening\n";
 			return false;
@@ -144,9 +182,9 @@ class ServerTcp
 			return false;
 		}
 
-		mainHandlerThreadPtr = make_shared<thread>(([this]() 
+		mainListeningThreadPtr = make_shared<thread>(([this]() 
 			{
-				handleNewConnection();
+				acceptNewConnection();
 			}));
 
 	}
@@ -183,9 +221,9 @@ private:
 		return serverControlSocket != INVALID_SOCKET && serverTransferSocket != INVALID_SOCKET && isConnected;
 	}
 
-	void handleNewConnection()
+	void acceptNewConnection()
 	{
-		SOCKET clientControlSocket;
+		SOCKET clientControlSocket, clientTransferSocket;
 		while (!ifExit.load())
 		{
 			clientControlSocket = accept(serverControlSocket, nullptr, nullptr);
@@ -195,14 +233,131 @@ private:
 				continue;
 			}
 
-			handleClientHandshake(clientControlSocket, generateUniqueId());
+			int curClientID = generateUniqueId();
+
+			if (!handleClientHandshake(clientControlSocket, curClientID))
+			{
+				cout << format("Error at {}, handshake failed with error {}\n", __func__, WSAGetLastError());
+				continue;
+			}
+
+			clientTransferSocket = handleClientConnectToTransferPort(curClientID);
+			if (clientTransferSocket == INVALID_SOCKET)
+			{
+				dropClient(clientControlSocket, INVALID_SOCKET);
+				continue;
+			}
+			
+			idToClintControlSocket[curClientID] = clientControlSocket;
+			idToClientTransferSocket[curClientID] = clientTransferSocket;
+
+			handleClient(curClientID);
 		}
+
+
+	}
+
+	void handleClient(const int curClientID)
+	{
+		int bytesSent = 0, bytesReceived = 0;
+		
+		SOCKET clientControlSocket = idToClintControlSocket[curClientID];
+		
+		char buffer[1024];
+		memset(buffer, 0, sizeof(buffer));
+
+		bytesReceived = recv(clientControlSocket, buffer, sizeof(buffer), 0);
+
+		while(bytesReceived != 0) 
+		{
+			nlohmann::json clientJson = nlohmann::json::parse(buffer);
+			if (clientJson.value(jsFields.kUniqueID, jsFieldsDefault.kUniqueID) == jsFieldsDefault.kUniqueID || 
+				clientJson.value(jsFields.kCommand, jsFieldsDefault.kCommand) == jsFieldsDefault.kCommand)
+			{
+				cerr << format("Error at {}, incorrect client json\n", __func__);
+				dropClient(clientControlSocket, idToClientTransferSocket[curClientID]);
+			}
+			Command curCommand = clientJson[jsFields.kCommand];
+			bool result = false;
+			switch (curCommand)
+			{
+			case Command::kGet: 
+				result = handleGetFromServer(clientJson, curClientID);
+				break;
+			case Command::kInfo:
+				result = handleGetFileInfo(clientJson, curClientID);
+				break;
+			case Command::kPut:
+				result = handlePutFile(clientJson, curClientID);
+				break;
+			case Command::kList:
+				result = handleListDir(clientJson, curClientID);
+				break;
+			default:
+				cerr << format("Error at {}, command not implemented", __func__);
+				break;
+			}
+			(result) ? cout << format("Success, command {} executed by user {}", curCommand, curClientID) : cout << format("Failed: command {} failed by user {}", curCommand, curClientID);
+		}
+
+
+	
+	
+	}
+
+	bool handleGetFromServer(const nlohmann::json& clientJson, const int& curClientID)
+	{
+		string fileName = clientJson.value(jsFields.kArgument, "");
+
+		if (fileName == "")
+		{
+			cout << format("Error at {} in request by user {}, file name Unknown or Empty\n", __func__, curClientID);
+			auto serverJson = getServerJsonTemplate(format("Error in request by user {}, file name Unknown or Empty", curClientID), StatusCode::kStatusFailure, curClientID);
+			send(idToClintControlSocket[curClientID], serverJson.dump().c_str(), serverJson.dump().size(), 0);	
+			
+			return false;
+		}
+
+		ifstream file(fileName, ios::binary);
+
+		if (!file)
+		{
+			cout << format("Error at {}, file {} not present in dir\n", __func__, fileName);
+			auto serverJson = getServerJsonTemplate(format("Error, could not find the file in DIR"), StatusCode::kStatusNotFound, curClientID);
+			send(idToClintControlSocket[curClientID], serverJson.dump().c_str(), serverJson.dump().size(), 0);
+			return false;
+		}
+		
+		auto serverJson = getServerJsonTemplate("", StatusCode::kStatusOK, curClientID, "", static_cast<long long>(common::getFileSize(file)) );
+		send(idToClintControlSocket[curClientID], serverJson.dump().c_str(), serverJson.dump().size(), 0);
+
+		if (transferFileToClient(curClientID))
+	
+		return true;
+	}
+	bool handleGetFileInfo(const nlohmann::json& clientJson, const int& curClientID)
+	{
+
+
+		return true;
+	}
+
+	bool transferFileToClient(const int curClientID)
+	{
+		SOCKET clientTransferSock = idToClientTransferSocket[curClientID];
+
+
+
+		
+		
 	}
 
 	bool tryHandShake()
 	{
-		// GOT to make the client init them by nick, not by id
+		// GOT to make the client init them by nick, not by id (will implemnt it in 4 assignment)
+		nlohmann::json requestJson = getServerJsonTemplate();
 		
+
 
 	}
 
@@ -222,7 +377,7 @@ private:
 		return id;
 	}
 
-	void handleClientHandshake(const SOCKET clientControlSocket, const int uniqueID)
+	bool handleClientHandshake(const SOCKET clientControlSocket, const int uniqueID)
 	{
 		nlohmann::json responseJson, requestJson = getServerJsonTemplate();
 
@@ -237,21 +392,69 @@ private:
 		if (bytesReceived == 0)
 		{
 			cout << format("Error at {}, client disconnected\n", __func__);
-			return;
+			return false;
 		}
 		responseJson = nlohmann::json::parse(buffer);
 		if (!ifClientJsonValid(responseJson) || responseJson.value(jsFields.kMessage, "default phrase") != kClientHandShakePhrase)
 		{
 			cerr << format("Error at {}, client json is not valid\n", __func__);
 			dropClient(clientControlSocket, INVALID_SOCKET);
-			return;
+			return false;
 		}
 		requestJson[jsFields.kMessage] = "";
 		requestJson[jsFields.kUniqueID] = uniqueID;
-		requestJson[jsFields.kTransferPort] = 
+		requestJson[jsFields.kTransferPort] = serverTransferPort;
+		
+		return send(clientControlSocket, requestJson.dump().c_str(), requestJson.dump().size(), 0) != 0;
+	}
 
-		send(clientControlSocket, requestJson.dump().c_str(), requestJson.dump().size(), 0);
+	SOCKET handleClientConnectToTransferPort(const int uniqueID)  // if I accept multiple clients on transfer port in multiple threads, I need a mutex and a notifier to notify the waiting thread that the client has connected or that the timeou thas passed
+	{
+		SOCKET clientTransferSocket = INVALID_SOCKET;
+			
+		auto startStamp = chrono::high_resolution_clock::now();
 
+		bool ifSuccess = false; 
+		
+		DWORD socketTimeout = static_cast<DWORD>(chrono::duration_cast<chrono::milliseconds>(kTimeout).count());
+
+		while (!ifSuccess && chrono::duration_cast<chrono::seconds>(chrono::high_resolution_clock::now() - startStamp) < kTimeout)
+		{
+			clientTransferSocket = INVALID_SOCKET;
+
+			setsockopt(serverTransferSocket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<char*>(&socketTimeout), sizeof(socketTimeout));
+			clientTransferSocket = accept(serverTransferSocket, nullptr, nullptr);
+
+			socketTimeout = 0;
+			setsockopt(serverTransferSocket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<char*>(&socketTimeout), sizeof(socketTimeout));
+			
+			if (clientTransferSocket == INVALID_SOCKET)
+				continue;
+
+			char buffer[1024];
+			memset(buffer, 0, sizeof(buffer));
+
+			int bytesReceived = recv(clientTransferSocket, buffer, sizeof(buffer) - 1, 0);
+
+			if (bytesReceived == 0)
+			{
+				closesocket(clientTransferSocket);
+				continue;
+			}
+			
+			nlohmann::json responseJson = nlohmann::json::parse(buffer);
+			ifSuccess = (
+				responseJson.value(jsFields.kUniqueID, -1) == uniqueID && 
+				responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure) == StatusCode::kStatusOK);
+			
+		}
+
+		if (!ifSuccess)
+		{
+			cout << format("Could not connect to transfer port, aborting..\n");
+		}
+
+		return clientTransferSocket;
 	}
 
 	static bool ifClientJsonValid(nlohmann::json jsObject)
@@ -270,13 +473,46 @@ private:
 		closesocket(clientTransferSocket);
 	}
 
-	static nlohmann::json getServerJsonTemplate()  
+	static nlohmann::json getServerJsonTemplate(
+		const string message = jsFieldsDefault.kMessage,
+		const common::StatusCode statusCode = jsFieldsDefault.kStatusCode,  
+		const int id = jsFieldsDefault.kUniqueID, 
+		string nickName = jsFieldsDefault.kNickname,
+		const int fileSize = jsFieldsDefault.kFileSize,
+		string fileName = jsFieldsDefault.kFileName, 
+		string fileInfo = jsFieldsDefault.kFileInfo)  
 	{
-		return {{jsFields.kStatusCode, StatusCode::kStatusOK}}; 
+		nlohmann::json result;
+
+		result[jsFields.kStatusCode] = statusCode;  // mandatory add the status code
+		
+		if (message != jsFieldsDefault.kMessage)
+			result[jsFields.kMessage] = message;
+
+		if (id != jsFieldsDefault.kUniqueID)
+			result[jsFields.kUniqueID] = id;
+
+		if (fileSize != jsFieldsDefault.kFileSize)
+			result[jsFields.kFileSize] = fileSize;
+
+		if (fileName != jsFieldsDefault.kFileName)
+			result[jsFields.kArgument] = fileName;
+
+		if (fileInfo != jsFieldsDefault.kFileInfo)
+			result[jsFields.kFileInfo] = fileInfo;
+
+		if (nickName != jsFieldsDefault.kNickname)
+			result[jsFields.kNickname] = nickName;
+
+		return result;
 	}
+
 	static inline const int kUniqueIdUpBound = 65535;
+	static inline chrono::seconds kTimeout{ 5 };
 
 	static inline const JsonFields jsFields;
+	static inline const server_utils::DefaultJsonFields jsFieldsDefault;
+
 	static inline const string kServerHandShakePhrase = "Hello client";
 	static inline const string kClientHandShakePhrase = "Hello server";
 	static inline const string kServerConfirmationPhrase = "OK";
@@ -295,7 +531,7 @@ private:
 	static inline int serverTransferPort;
 
 	static inline shared_ptr<ServerTcp> thisServerPtr = nullptr;
-	static inline shared_ptr<thread> mainHandlerThreadPtr = nullptr;
+	static inline shared_ptr<thread> mainListeningThreadPtr = nullptr;
 
 	static inline SOCKET serverControlSocket = INVALID_SOCKET;
 	static inline SOCKET serverTransferSocket = INVALID_SOCKET;
@@ -346,7 +582,95 @@ chrono::system_clock::time_point getLastModifiedTime(const string& filePath)
 
 
 
+
+
+
+
+
+
+
+
+
 int main()
 {
+	listDir();
+	//getLastModifiedTime("./");
+	return 0;
+	// Initialize Winsock
+	WSADATA wsaData;
+	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+	{
+		std::cerr << "WSAStartup failed" << std::endl;
+		return 1;
+	}
+	// Server configuration
+	int port = 12345;
+	SOCKET serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+	if (serverSocket == INVALID_SOCKET)
+	{
+		std::cerr << "Error creating socket: " << WSAGetLastError() << std::endl;
+		WSACleanup();
+		return 1;
+	}
+	sockaddr_in serverAddr;
+	serverAddr.sin_family = AF_INET;
+	serverAddr.sin_addr.s_addr = INADDR_ANY;
+	serverAddr.sin_port = htons(port);
+	// Bind the socket
+	if (bind(serverSocket, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR)
+	{
+		std::cerr << "Bind failed with error: " << WSAGetLastError() << std::endl;
+		closesocket(serverSocket);
+		WSACleanup();
+		return 1;
+	}
+	// Listen for incoming connections
+	if (listen(serverSocket, SOMAXCONN) == SOCKET_ERROR)
+	{
+		std::cerr << "Listen failed with error: " << WSAGetLastError() << std::endl;
+		closesocket(serverSocket);
+		WSACleanup();
+		return 1;
+	}
+	std::cout << "Server listening on port " << port << std::endl;
+	// Accept a client connection
+	SOCKET clientControlSocket = accept(serverSocket, nullptr, nullptr);
+	if (clientControlSocket == INVALID_SOCKET)
+	{
+		std::cerr << "Accept failed with error: " << WSAGetLastError() << std::endl;
+		closesocket(serverSocket);
+		WSACleanup();
+		return 1;
+	}
+	// Receive data from the client
+	char buffer[1024];
+	DWORD timeout = 800; // 5 seconds
+	setsockopt(clientControlSocket, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+	ofstream file("photo1.jpg", ios::binary);
+	while(true)
+	{
+		memset(buffer, 0, sizeof(buffer));
+		int bytesReceived = recv(clientControlSocket, buffer, sizeof(buffer) - 1, 0);
+		if (bytesReceived > 0)
+		{
+			file.write(buffer, bytesReceived);
+
+			std::cout << "Received data: " << buffer << std::endl;
+			// Send a response back to the client
+			
+		}
+		else
+		{
+			string response = "Hello, client! This is the server.";
+			send(clientControlSocket, response.c_str(), (int)response.size(), 0);
+			break;
+		}
+	}
+
+	
+	// Clean up
+	closesocket(clientControlSocket);
+	closesocket(serverSocket);
+	WSACleanup();
 	return 0;
 }
