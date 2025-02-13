@@ -13,10 +13,14 @@
 #include <thread>
 #include <atomic>
 #include <random>
-#include <chrono>
+#include <chrono>  
+#include <regex>
+#include <vector>  
+#include <string>
+
 
 #pragma comment(lib, "ws2_32.lib")
-
+using namespace std;
 
 namespace common
 {
@@ -54,21 +58,20 @@ namespace common
 }
 
 
-using namespace std;
-using namespace common;
 namespace server_utils
 {
 	struct DefaultJsonFields   
 	{
 		const string			 kMessage	   = "";
-		const common::StatusCode kStatusCode   = StatusCode::kStatusOK;
+		const string			 kArgument	   = "";
+		const common::StatusCode kStatusCode   = common::StatusCode::kStatusOK;
 		const int				 kTransferPort = -1;
 		const int				 kUniqueID	   = -1;
 		const int				 kFileSize	   = -1;
 		const string			 kFileName	   = "";
 		const string			 kFileInfo	   = "";
 		const string			 kNickname	   = "";
-		const Command			 kCommand	   = Command::kDefault;
+		const common::Command	 kCommand	   = common::Command::kDefault;
 	};
 
 	
@@ -89,11 +92,27 @@ struct JsonFields
 	const string kNickname = "nickname";
 };
 
+vector<string> listDir(string directoryPath = ".")
+{
+	vector<string> result;
 
+	if (!filesystem::exists(directoryPath) || !filesystem::is_directory(directoryPath))
+	{
+		cerr << "Error: Directory does not exist or is not a directory!\n";
+		return result;
+	}
+
+	for (auto& entry : std::filesystem::directory_iterator(directoryPath))
+	{
+		result.push_back(entry.path().filename().string());  // Print only the file name
+	}
+	return result;
+}
 
 class ServerTcp
 {
-	optional<shared_ptr<ServerTcp>> initServer(const unsigned int controlPort, const unsigned int transferPort)
+public:
+	static optional<shared_ptr<ServerTcp>/*<ServerTcp**/> initServer()
 	{
 		if (thisServerPtr != nullptr)
 		{
@@ -111,8 +130,8 @@ class ServerTcp
 		}
 
 		isLibLoaded = true;
-		thisServerPtr = shared_ptr<ServerTcp>(new ServerTcp());
-
+		thisServerPtr = shared_ptr<ServerTcp>(new ServerTcp);
+		
 		if (!thisServerPtr->initSockets())
 		{
 			thisServerPtr = nullptr;
@@ -190,21 +209,28 @@ class ServerTcp
 	}
 
 	~ServerTcp()
-	{
+	{  // also got to make the other foelds smart_ptr to avoid premature object cleanup 	
+		ifExit = true;
+		mainListeningThreadPtr->join();
 		dropAllConnections();
 		if (isLibLoaded)
 		{
 			WSACleanup();
 		}
+
 	}
 
-private:
-	ServerTcp() 
+	explicit ServerTcp()
 	{
 		serverAddr.sin_family = AF_INET;
 		serverAddr.sin_addr.s_addr = INADDR_ANY;
 	}
 
+private:
+
+
+
+	friend class shared_ptr<ServerTcp>;
 	void dropAllConnections()
 	{
 		closesocket(serverControlSocket);
@@ -218,7 +244,7 @@ private:
 
 	bool isConnectionValid() const noexcept
 	{
-		return serverControlSocket != INVALID_SOCKET && serverTransferSocket != INVALID_SOCKET && isConnected;
+		return serverControlSocket != INVALID_SOCKET && serverTransferSocket != INVALID_SOCKET;
 	}
 
 	void acceptNewConnection()
@@ -232,8 +258,10 @@ private:
 				cerr << format("Error at {}, could not accept client\n", __func__);
 				continue;
 			}
-
+			
 			int curClientID = generateUniqueId();
+
+			// ------ here got to start another thread for async accept of new clients, handleNewConnection() 
 
 			if (!handleClientHandshake(clientControlSocket, curClientID))
 			{
@@ -244,7 +272,7 @@ private:
 			clientTransferSocket = handleClientConnectToTransferPort(curClientID);
 			if (clientTransferSocket == INVALID_SOCKET)
 			{
-				dropClient(clientControlSocket, INVALID_SOCKET);
+				dropClient(curClientID);
 				continue;
 			}
 			
@@ -268,89 +296,257 @@ private:
 
 		bytesReceived = recv(clientControlSocket, buffer, sizeof(buffer), 0);
 
-		while(bytesReceived != 0) 
+		while(bytesReceived != 0 && !ifExit) 
 		{
-			nlohmann::json clientJson = nlohmann::json::parse(buffer);
+			string receivedStr = buffer;
+			nlohmann::json clientJson = nlohmann::json::parse(receivedStr.substr(0, receivedStr.find(kCommandDelimiter)));
+
 			if (clientJson.value(jsFields.kUniqueID, jsFieldsDefault.kUniqueID) == jsFieldsDefault.kUniqueID || 
 				clientJson.value(jsFields.kCommand, jsFieldsDefault.kCommand) == jsFieldsDefault.kCommand)
 			{
 				cerr << format("Error at {}, incorrect client json\n", __func__);
-				dropClient(clientControlSocket, idToClientTransferSocket[curClientID]);
+				dropClient(curClientID);
+				return;
 			}
-			Command curCommand = clientJson[jsFields.kCommand];
+
+			common::Command curCommand = clientJson[jsFields.kCommand];
 			bool result = false;
 			switch (curCommand)
 			{
-			case Command::kGet: 
+			case common::Command::kGet: 
 				result = handleGetFromServer(clientJson, curClientID);
 				break;
-			case Command::kInfo:
+			case common::Command::kInfo:
 				result = handleGetFileInfo(clientJson, curClientID);
 				break;
-			case Command::kPut:
+			case common::Command::kPut:
 				result = handlePutFile(clientJson, curClientID);
 				break;
-			case Command::kList:
+			case common::Command::kList:
 				result = handleListDir(clientJson, curClientID);
 				break;
 			default:
 				cerr << format("Error at {}, command not implemented", __func__);
 				break;
 			}
-			(result) ? cout << format("Success, command {} executed by user {}", curCommand, curClientID) : cout << format("Failed: command {} failed by user {}", curCommand, curClientID);
+			
+			(result) ? cout << format("Success, command {} executed by user {}", static_cast<int>(curCommand), curClientID) : cout << format("Failed: command {} failed by user {}", static_cast<int>(curCommand), curClientID);
 		}
-
-
-	
-	
 	}
 
 	bool handleGetFromServer(const nlohmann::json& clientJson, const int& curClientID)
 	{
-		string fileName = clientJson.value(jsFields.kArgument, "");
+		const string fileName = clientJson.value(jsFields.kArgument, "");
+		const string filePath = kDefaultDir + "/" + fileName;
 
-		if (fileName == "")
+		if (ifFileNameValid(fileName) && fileExists(filePath))
 		{
-			cout << format("Error at {} in request by user {}, file name Unknown or Empty\n", __func__, curClientID);
-			auto serverJson = getServerJsonTemplate(format("Error in request by user {}, file name Unknown or Empty", curClientID), StatusCode::kStatusFailure, curClientID);
-			send(idToClintControlSocket[curClientID], serverJson.dump().c_str(), serverJson.dump().size(), 0);	
+			cout << format("Error at {} in request by user {}, file name Invalid or Empty\n", __func__, curClientID);
+
+			auto serverJsonStr = string(getServerJsonTemplate(format("Error in request by user {}, invalid file name or file not found", curClientID), common::StatusCode::kStatusFailure, curClientID)) + kCommandDelimiter;
+			send(idToClintControlSocket[curClientID], (serverJsonStr).c_str(), serverJsonStr.size(), 0);	
 			
 			return false;
 		}
 
-		ifstream file(fileName, ios::binary);
+		ifstream file(filePath, ios::binary);
+		
+		long long fileSize = static_cast<long long>(common::getFileSize(file));
 
-		if (!file)
+		auto serverJsonStr = getServerJsonTemplate("", common::StatusCode::kStatusOK, curClientID, "", fileSize).dump() + kCommandDelimiter;
+		send(idToClintControlSocket[curClientID], serverJsonStr.c_str(), serverJsonStr.size(), 0);
+
+		if (!transferFileToClient(curClientID, file, static_cast<long long>(common::getFileSize(file))))
 		{
-			cout << format("Error at {}, file {} not present in dir\n", __func__, fileName);
-			auto serverJson = getServerJsonTemplate(format("Error, could not find the file in DIR"), StatusCode::kStatusNotFound, curClientID);
-			send(idToClintControlSocket[curClientID], serverJson.dump().c_str(), serverJson.dump().size(), 0);
+			cerr << format("Error at {}, issue transferring file {}\n", __func__, fileName);
+			dropClient(curClientID);
+			return false;
+		}
+
+		cout << format("Success: transfered file {} to client with ses ID {}", fileName, curClientID);
+		return true;
+	}
+
+	bool handleGetFileInfo(const nlohmann::json& clientJson, const int& curClientID)
+	{
+		const string fileName = clientJson.value(jsFields.kArgument, "");
+		const string filePath = kDefaultDir + "/" + fileName;
+
+		if (ifFileNameValid(fileName) && fileExists(filePath))
+		{
+			cout << format("Error at {} in request by user {}, file name Invalid or file not found\n", __func__, curClientID);
+
+			auto serverJsonStr = string(getServerJsonTemplate(format("Error in request by user {}, file name Invalid or file not found", curClientID), common::StatusCode::kStatusFailure, curClientID)) + kCommandDelimiter;
+			send(idToClintControlSocket[curClientID], (serverJsonStr).c_str(), serverJsonStr.size(), 0);
+
 			return false;
 		}
 		
-		auto serverJson = getServerJsonTemplate("", StatusCode::kStatusOK, curClientID, "", static_cast<long long>(common::getFileSize(file)) );
-		send(idToClintControlSocket[curClientID], serverJson.dump().c_str(), serverJson.dump().size(), 0);
+		chrono::time_point<chrono::file_clock, chrono::seconds> lastWriteTime;
 
-		if (transferFileToClient(curClientID))
-	
-		return true;
+		try
+		{
+			auto ftime = filesystem::last_write_time(filePath);
+			lastWriteTime = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
+		}
+		catch (const filesystem::filesystem_error& e)
+		{
+			string serverJsonStr = getServerJsonTemplate(format("Error getting the write time of file{}", fileName), common::StatusCode::kStatusFailure, curClientID);
+			send(idToClintControlSocket[curClientID], serverJsonStr.c_str(), serverJsonStr.size(), 0);
+		}
+		
+		ifstream file(filePath, ios::binary);
+
+		string info = format("{} | {} bytes", lastWriteTime, common::getFileSize(file));
+
+		string serverJsonStr = getServerJsonTemplate("", common::StatusCode::kStatusOK, curClientID);
+		send(idToClintControlSocket[curClientID], serverJsonStr.c_str(), serverJsonStr.size(), 0);
+		
+		
+		return transferFileInfo(curClientID, info);;
 	}
-	bool handleGetFileInfo(const nlohmann::json& clientJson, const int& curClientID)
-	{
 
-
-		return true;
-	}
-
-	bool transferFileToClient(const int curClientID)
+	bool transferFileToClient(const int curClientID, ifstream& file, const long long fileSize)
 	{
 		SOCKET clientTransferSock = idToClientTransferSocket[curClientID];
 
+		const size_t kChunkSize = 1024;
+		long long bytesRead = 0, totalRealBytesUploaded = 0;
 
+		char buffer[kChunkSize];
+		memset(buffer, 0, sizeof(buffer));
 
+		while (file.read(buffer, kChunkSize) || file.gcount() > 0)
+		{
+			bytesRead = file.gcount();
+			totalRealBytesUploaded += bytesRead;
+
+			send(clientTransferSock, buffer, bytesRead, 0);   // raw 
+			memset(buffer, 0, sizeof(buffer));
+		}
+
+		return totalRealBytesUploaded == fileSize;
+	}
+
+	bool transferFileInfo(const int curClientID, const string& info)
+	{
+		string serverJsonStr = getServerJsonTemplate("", common::StatusCode::kStatusOK, curClientID, "", -1, "", info);
+		return SOCKET_ERROR != send(idToClientTransferSocket[curClientID], serverJsonStr.c_str(), serverJsonStr.size(), 0);
+	}
+
+	bool handlePutFile(nlohmann::json clientJson, const int curClientID)
+	{
 		
+		if (clientJson.value(jsFields.kArgument, "") == jsFieldsDefault.kArgument || 
+			clientJson.value(jsFields.kFileSize, -1)  == jsFieldsDefault.kFileSize || 
+			fileExists(kDefaultDir + "/" + clientJson.value(jsFields.kFileNames, "")))
+		{
+			cerr << format("Error at {}, invalid file size or file name or file already exists\n", __func__);
+			string serverJsonStr = getServerJsonTemplate("Error, invalid file size, name or file already exists", common::StatusCode::kStatusFailure, curClientID).dump() + kCommandDelimiter;
+			send(idToClintControlSocket[curClientID], serverJsonStr.c_str(), serverJsonStr.size(), 0);
+			return false;
+		}
+		
+		string serverJsonStr = getServerJsonTemplate("", common::StatusCode::kStatusOK, curClientID).dump() + kCommandDelimiter;
+		
+		if (SOCKET_ERROR == send(idToClintControlSocket[curClientID], serverJsonStr.c_str(), serverJsonStr.size(), 0))
+		{
+			cerr << format("Erorr at {}, client disconnected, closing session\n", __func__);
+			dropClient(curClientID);
+			return false;
+		}
+		
+
+		return acceptFile(curClientID, clientJson[jsFields.kArgument], clientJson[jsFields.kFileSize]);
+	}
+
+	bool acceptFile(const int curClientID, const string& fileName, const int fileSize) 
+	{
+		/*
+		if (!isConnectionValid())
+		{
+			cerr << format("Error at {}, connection was not valid\n", __func__);
+			return false;
+		}
+		*/
+		int bytesReceived = 0, totalRealBytesReceived = 0;
+
+		char buffer[1024];
+
+		string filePath = kDefaultDir + "/" + fileName;
+
+		ofstream newFile(filePath, ios::binary);
+
+		while ((bytesReceived = recv(idToClientTransferSocket[curClientID], buffer, sizeof(buffer) - 1, 0)) && totalRealBytesReceived < fileSize && bytesReceived != 0)
+		{
+			newFile.write(buffer, bytesReceived);
+			totalRealBytesReceived += bytesReceived;
+		}
+		newFile.close();
+
+		return true;
+	}
+
+	bool handleListDir(nlohmann::json clientJson, const int curClientID)
+	{
+		string dir = kDefaultDir;
+
+		if (!filesystem::exists(dir))
+		{
+			cerr << format("Error at {}, dir {} was not found\n", __func__, dir);
+			string serverJsonStr = getServerJsonTemplate(format("Error, dir {} is not found", dir), common::StatusCode::kStatusNotFound, curClientID).dump() + kCommandDelimiter;
+			send(idToClintControlSocket[curClientID], serverJsonStr.c_str(), serverJsonStr.size(), 0);
+			return false;
+		}
+		
+		nlohmann::json serverFileInfoJson = getServerJsonTemplate("", common::StatusCode::kStatusOK, curClientID);
+		serverFileInfoJson[jsFields.kFileNames] = listDir(kDefaultDir);
+
+		nlohmann::json serverJsonResponse = getServerJsonTemplate("", common::StatusCode::kStatusOK, curClientID, "", serverFileInfoJson.dump().size());
+		
+		string serverJsonResponseStr = serverJsonResponse.dump() + kCommandDelimiter;
+
+		if (SOCKET_ERROR == send(idToClintControlSocket[curClientID], serverJsonResponseStr.c_str(), serverJsonResponseStr.size(), 0))
+		{
+			dropClient(curClientID);
+			cerr << format("Error at {}, disconnectiong client\n", __func__);
+			return false;
+		}
+		
+		return transferFileList(curClientID, serverFileInfoJson.dump());
+
 		
 	}
+
+	bool transferFileList(const int curClientID, const string& serverJsonStr)
+	{
+		const size_t kChunkSize = 1024;
+		int bytesUploaded = 0, totalRealBytesUploaded = 0;
+
+		char buffer[kChunkSize];
+		memset(buffer, 0, sizeof(buffer));
+
+		while (totalRealBytesUploaded < serverJsonStr.size())
+		{
+			bytesUploaded = send(idToClientTransferSocket[curClientID], buffer, bytesUploaded, 0);
+			
+			if (bytesUploaded == SOCKET_ERROR)
+			{
+				cerr << format("Error at {}, error uploading file list json\n", __func__);
+				dropClient(curClientID);
+				return false;
+			}
+
+			totalRealBytesUploaded += bytesUploaded;
+
+			memset(buffer, 0, sizeof(buffer));
+		}
+
+		return true;
+	
+		
+	}
+
 
 	bool tryHandShake()
 	{
@@ -359,12 +555,13 @@ private:
 		
 
 
+
 	}
 
-	int generateUniqueId() const
+	int generateUniqueId() 
 	{
 		int id = 1;
-		while (alreadyUsedId.contains(id) && alreadyUsedId.size() < kUniqueIdUpBound)
+		while (alreadyUsedID.contains(id) && alreadyUsedID.size() < kUniqueIdUpBound - 1)
 		{
 			random_device rd;
 			mt19937 gen(rd());
@@ -372,7 +569,7 @@ private:
 			id = dist(gen);
 		}
 
-		alreadyUsedId.insert(id);
+		alreadyUsedID.insert(id);
 		
 		return id;
 	}
@@ -398,7 +595,7 @@ private:
 		if (!ifClientJsonValid(responseJson) || responseJson.value(jsFields.kMessage, "default phrase") != kClientHandShakePhrase)
 		{
 			cerr << format("Error at {}, client json is not valid\n", __func__);
-			dropClient(clientControlSocket, INVALID_SOCKET);
+			dropClient(clientControlSocket);
 			return false;
 		}
 		requestJson[jsFields.kMessage] = "";
@@ -445,8 +642,7 @@ private:
 			nlohmann::json responseJson = nlohmann::json::parse(buffer);
 			ifSuccess = (
 				responseJson.value(jsFields.kUniqueID, -1) == uniqueID && 
-				responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure) == StatusCode::kStatusOK);
-			
+				responseJson.value(jsFields.kStatusCode, common::StatusCode::kStatusFailure) == common::StatusCode::kStatusOK);
 		}
 
 		if (!ifSuccess)
@@ -467,10 +663,25 @@ private:
 			jsObject.contains(jsFields.kVersion);
 	}
 
-	void dropClient(SOCKET clientControlSocket, SOCKET clientTransferSocket)
+	static bool ifFileNameValid(const string fileName)
 	{
-		closesocket(clientControlSocket);
-		closesocket(clientTransferSocket);
+		if (fileName.find("\\"))
+		{
+			return false;
+		}
+		return regex_match(fileName, validFileNamePattern);
+	
+	}
+
+	void dropClient(const int curClientID)
+	{
+		closesocket(idToClintControlSocket[curClientID]);
+		closesocket(idToClientTransferSocket[curClientID]);
+
+		idToClientTransferSocket.erase(curClientID);
+		idToClintControlSocket.erase(curClientID);
+		alreadyUsedID.erase(curClientID);
+		
 	}
 
 	static nlohmann::json getServerJsonTemplate(
@@ -507,7 +718,17 @@ private:
 		return result;
 	}
 
+	static inline bool fileExists(const string& filePath)
+	{
+		return filesystem::exists(filePath) && filesystem::is_regular_file(filePath);
+	}
+
 	static inline const int kUniqueIdUpBound = 65535;
+
+	static inline const string kDefaultDir = "default";
+	static inline regex validFileNamePattern = basic_regex<char>(R"(^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+)?$)");
+
+
 	static inline chrono::seconds kTimeout{ 5 };
 
 	static inline const JsonFields jsFields;
@@ -525,12 +746,12 @@ private:
 	static inline bool	  isLibLoaded = false;
 	static inline bool	  isConnected = false;
 	static inline WSADATA wsaData;
-	static sockaddr_in serverAddr;
+	static inline sockaddr_in serverAddr;
 	static inline atomic<bool> ifExit = false ;
 	static inline int serverControlPort;
 	static inline int serverTransferPort;
 
-	static inline shared_ptr<ServerTcp> thisServerPtr = nullptr;
+	static inline shared_ptr<ServerTcp> /*ServerTcp* */thisServerPtr = nullptr;
 	static inline shared_ptr<thread> mainListeningThreadPtr = nullptr;
 
 	static inline SOCKET serverControlSocket = INVALID_SOCKET;
@@ -540,28 +761,14 @@ private:
 	unordered_map<int, SOCKET> idToClientTransferSocket;
 	unordered_map<int, string> idToNickName;
 
-	unordered_set<int> alreadyUsedId;
+	unordered_set<long long> alreadyUsedID;
 
 	vector<thread> clientsThreadVec;
 
+
 	
 };
-vector<string> listDir(const string& directoryPath = ".")
-{
-	vector<string> result;
 
-	if (!filesystem::exists(directoryPath) || !filesystem::is_directory(directoryPath)) 
-	{
-		cerr << "Error: Directory does not exist or is not a directory!\n";
-		return result;  
-	}
-
-	for (const auto& entry : filesystem::directory_iterator(directoryPath)) 
-	{
-		 result.push_back(entry.path().filename().string());  // Print only the file name
-	}
-	return result;
-}
 
 /*
 chrono::system_clock::time_point getLastModifiedTime(const string& filePath) 
@@ -593,7 +800,11 @@ chrono::system_clock::time_point getLastModifiedTime(const string& filePath)
 
 int main()
 {
-	listDir();
+	auto ptr = ServerTcp::initServer();
+	
+
+	/*
+	//listDir();
 	//getLastModifiedTime("./");
 	return 0;
 	// Initialize Winsock
@@ -617,7 +828,7 @@ int main()
 	serverAddr.sin_addr.s_addr = INADDR_ANY;
 	serverAddr.sin_port = htons(port);
 	// Bind the socket
-	if (bind(serverSocket, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR)
+	if (::bind(serverSocket, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR)
 	{
 		std::cerr << "Bind failed with error: " << WSAGetLastError() << std::endl;
 		closesocket(serverSocket);
@@ -673,4 +884,5 @@ int main()
 	closesocket(serverSocket);
 	WSACleanup();
 	return 0;
+	*/
 }
