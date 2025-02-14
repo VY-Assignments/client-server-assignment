@@ -184,55 +184,109 @@ public:
 		return true;
 	}
 
-	bool startListening()
-	{
-		if (mainListeningThreadPtr == nullptr)
+		bool startListening()
 		{
-			cout << "Already listening\n";
-			return false;
-		}
-		int resultControl = listen(serverControlSocket, SOMAXCONN);
-		int resultTransfer = listen(serverTransferSocket, SOMAXCONN);
-
-		if (resultControl == SOCKET_ERROR || resultTransfer == SOCKET_ERROR)
-		{
-			cerr << format("Error at {}, listen failed with error: {}\n", __func__, WSAGetLastError());
-			dropAllConnections();
-			return false;
-		}
-
-		mainListeningThreadPtr = make_shared<thread>(([this]() 
+			if (mainListeningThreadPtr != nullptr)
 			{
-				acceptNewConnection();
-			}));
+				cout << "Already listening\n";
+				return false;
+			}
+			int resultControl = listen(serverControlSocket, SOMAXCONN);
+			int resultTransfer = listen(serverTransferSocket, SOMAXCONN);
 
-	}
+			if (resultControl == SOCKET_ERROR || resultTransfer == SOCKET_ERROR)
+			{
+				cerr << format("Error at {}, listen failed with error: {}\n", __func__, WSAGetLastError());
+				dropAllConnections();
+				return false;
+			}
 
-	~ServerTcp()
-	{  // also got to make the other foelds smart_ptr to avoid premature object cleanup 	
-		ifExit = true;
-		mainListeningThreadPtr->join();
-		dropAllConnections();
-		if (isLibLoaded)
-		{
-			WSACleanup();
+			mainListeningThreadPtr = make_shared<thread>(([this]() 
+				{
+					acceptNewConnection();
+				}));
+
 		}
 
-	}
+		void acceptNewConnection()
+		{
+			SOCKET clientControlSocket = INVALID_SOCKET, clientTransferSocket = INVALID_SOCKET;
+			DWORD socketTimeout = static_cast<DWORD>(chrono::duration_cast<chrono::milliseconds>(kTimeout).count());
+
+
+
+			while (!ifExit.load())
+			{
+				clientControlSocket = tryAcceptClientSocket(serverControlSocket);
+
+				if (clientControlSocket == INVALID_SOCKET)
+				{
+					cerr << format("Error at {}, could not accept client\n", __func__);
+					continue;
+				}
+
+				int curClientID = generateUniqueId();
+
+				// ------ here got to start another thread for async accept of new clients, handleNewConnection() 
+
+				if (!handleClientHandshake(clientControlSocket, curClientID))
+				{
+					cout << format("Error at {}, handshake failed with error {}\n", __func__, WSAGetLastError());
+					continue;
+				}
+
+				clientTransferSocket = handleClientConnectToTransferPort(curClientID);
+				if (clientTransferSocket == INVALID_SOCKET)
+				{
+					dropClient(curClientID);
+					continue;
+				}
+
+				idToClintControlSocket[curClientID] = clientControlSocket;
+				idToClientTransferSocket[curClientID] = clientTransferSocket;
+
+				handleClient(curClientID);
+			}
+
+
+		}
+
+
+		~ServerTcp()
+		{  	
+			ifExit = true;
+
+			dropAllConnections();
+
+			//this_thread::sleep_for(5s);
+
+			//shutdown(serverControlSocket, SD_BOTH);  // Shut down the socket to wake up select()
+			if (mainListeningThreadPtr->joinable())
+			{
+				mainListeningThreadPtr->join();
+			}
+			if (isLibLoaded)
+			{
+				WSACleanup();
+			}
+
+		}
 
 	explicit ServerTcp()
 	{
 		serverAddr.sin_family = AF_INET;
 		serverAddr.sin_addr.s_addr = INADDR_ANY;
+
 	}
 
 private:
 
-
-
 	friend class shared_ptr<ServerTcp>;
-	void dropAllConnections()
+	void dropAllConnections()   // not a thread - safe operation
 	{
+		shutdown(serverControlSocket, SD_BOTH);
+		shutdown(serverTransferSocket, SD_BOTH);
+
 		closesocket(serverControlSocket);
 		closesocket(serverTransferSocket);
 
@@ -247,56 +301,19 @@ private:
 		return serverControlSocket != INVALID_SOCKET && serverTransferSocket != INVALID_SOCKET;
 	}
 
-	void acceptNewConnection()
-	{
-		SOCKET clientControlSocket, clientTransferSocket;
-		while (!ifExit.load())
-		{
-			clientControlSocket = accept(serverControlSocket, nullptr, nullptr);
-			if (clientControlSocket == INVALID_SOCKET)
-			{
-				cerr << format("Error at {}, could not accept client\n", __func__);
-				continue;
-			}
-			
-			int curClientID = generateUniqueId();
 
-			// ------ here got to start another thread for async accept of new clients, handleNewConnection() 
-
-			if (!handleClientHandshake(clientControlSocket, curClientID))
-			{
-				cout << format("Error at {}, handshake failed with error {}\n", __func__, WSAGetLastError());
-				continue;
-			}
-
-			clientTransferSocket = handleClientConnectToTransferPort(curClientID);
-			if (clientTransferSocket == INVALID_SOCKET)
-			{
-				dropClient(curClientID);
-				continue;
-			}
-			
-			idToClintControlSocket[curClientID] = clientControlSocket;
-			idToClientTransferSocket[curClientID] = clientTransferSocket;
-
-			handleClient(curClientID);
-		}
-
-
-	}
 
 	void handleClient(const int curClientID)
 	{
 		int bytesSent = 0, bytesReceived = 0;
 		
 		SOCKET clientControlSocket = idToClintControlSocket[curClientID];
-		
 		char buffer[1024];
 		memset(buffer, 0, sizeof(buffer));
 
 		bytesReceived = recv(clientControlSocket, buffer, sizeof(buffer), 0);
-
-		while(bytesReceived != 0 && !ifExit) 
+		
+		while(bytesReceived != 0 && !ifExit.load()) 
 		{
 			string receivedStr = buffer;
 			nlohmann::json clientJson = nlohmann::json::parse(receivedStr.substr(0, receivedStr.find(kCommandDelimiter)));
@@ -330,7 +347,10 @@ private:
 				break;
 			}
 			
-			(result) ? cout << format("Success, command {} executed by user {}", static_cast<int>(curCommand), curClientID) : cout << format("Failed: command {} failed by user {}", static_cast<int>(curCommand), curClientID);
+			(result) ? cout << format("Success, command {} executed by user {}\n", static_cast<int>(curCommand), curClientID) : cout << format("Failed: command {} failed by user {}\n", static_cast<int>(curCommand), curClientID);
+			memset(buffer, 0, sizeof(buffer));
+
+			bytesReceived = recv(clientControlSocket, buffer, sizeof(buffer), 0);
 		}
 	}
 
@@ -363,7 +383,7 @@ private:
 			return false;
 		}
 
-		cout << format("Success: transfered file {} to client with ses ID {}", fileName, curClientID);
+		cout << format("Success: transfered file {} to client with ses ID {}\n", fileName, curClientID);
 		return true;
 	}
 
@@ -399,7 +419,7 @@ private:
 
 		string info = format("{} | {} bytes", lastWriteTime, common::getFileSize(file));
 
-		string serverJsonStr = getServerJsonTemplate("", common::StatusCode::kStatusOK, curClientID);
+		string serverJsonStr = getServerJsonTemplate("", common::StatusCode::kStatusOK, curClientID).dump();
 		send(idToClintControlSocket[curClientID], serverJsonStr.c_str(), serverJsonStr.size(), 0);
 		
 		
@@ -430,7 +450,7 @@ private:
 
 	bool transferFileInfo(const int curClientID, const string& info)
 	{
-		string serverJsonStr = getServerJsonTemplate("", common::StatusCode::kStatusOK, curClientID, "", -1, "", info);
+		string serverJsonStr = getServerJsonTemplate("", common::StatusCode::kStatusOK, curClientID, "", -1, "", info).dump();
 		return SOCKET_ERROR != send(idToClientTransferSocket[curClientID], serverJsonStr.c_str(), serverJsonStr.size(), 0);
 	}
 
@@ -439,7 +459,7 @@ private:
 		
 		if (clientJson.value(jsFields.kArgument, "") == jsFieldsDefault.kArgument || 
 			clientJson.value(jsFields.kFileSize, -1)  == jsFieldsDefault.kFileSize || 
-			fileExists(kDefaultDir + "/" + clientJson.value(jsFields.kFileNames, "")))
+			fileExists(kDefaultDir + "/" + clientJson.value(jsFields.kArgument, "")))
 		{
 			cerr << format("Error at {}, invalid file size or file name or file already exists\n", __func__);
 			string serverJsonStr = getServerJsonTemplate("Error, invalid file size, name or file already exists", common::StatusCode::kStatusFailure, curClientID).dump() + kCommandDelimiter;
@@ -456,28 +476,34 @@ private:
 			return false;
 		}
 		
+		string curDir = kDefaultDir;
+
+		if (!filesystem::exists(curDir))
+		{
+			if (filesystem::create_directories(curDir))
+			{
+				cout << "Directory created: " << curDir << '\n';
+			}
+			else
+			{
+				cerr << "Failed to create directory: " << curDir << '\n';
+				return false;
+			}
+		}
 
 		return acceptFile(curClientID, clientJson[jsFields.kArgument], clientJson[jsFields.kFileSize]);
 	}
 
 	bool acceptFile(const int curClientID, const string& fileName, const int fileSize) 
 	{
-		/*
-		if (!isConnectionValid())
-		{
-			cerr << format("Error at {}, connection was not valid\n", __func__);
-			return false;
-		}
-		*/
 		int bytesReceived = 0, totalRealBytesReceived = 0;
 
-		char buffer[1024];
-
-		string filePath = kDefaultDir + "/" + fileName;
+		char buffer[1024]; 
+		string dir = kDefaultDir, filePath = dir + "/" + fileName;
 
 		ofstream newFile(filePath, ios::binary);
 
-		while ((bytesReceived = recv(idToClientTransferSocket[curClientID], buffer, sizeof(buffer) - 1, 0)) && totalRealBytesReceived < fileSize && bytesReceived != 0)
+		while (totalRealBytesReceived < fileSize && (bytesReceived = recv(idToClientTransferSocket[curClientID], buffer, sizeof(buffer) - 1, 0)) && bytesReceived != 0)
 		{
 			newFile.write(buffer, bytesReceived);
 			totalRealBytesReceived += bytesReceived;
@@ -514,12 +540,11 @@ private:
 		}
 		
 		return transferFileList(curClientID, serverFileInfoJson.dump());
-
-		
 	}
 
 	bool transferFileList(const int curClientID, const string& serverJsonStr)
 	{
+		/*
 		const size_t kChunkSize = 1024;
 		int bytesUploaded = 0, totalRealBytesUploaded = 0;
 
@@ -543,7 +568,38 @@ private:
 		}
 
 		return true;
-	
+	*/
+		const size_t kChunkSize = 1024;
+		int bytesUploaded = 0;
+		size_t totalRealBytesUploaded = 0;
+
+		while (totalRealBytesUploaded < serverJsonStr.size())
+		{
+			// Calculate the remaining bytes to be sent
+			size_t remainingBytes = serverJsonStr.size() - totalRealBytesUploaded;
+
+			// Determine the chunk size for this iteration
+			size_t chunkSize = min(kChunkSize, remainingBytes);
+
+			// Get the current chunk
+			std::string chunk = serverJsonStr.substr(totalRealBytesUploaded, chunkSize);
+
+			// Send the chunk
+			bytesUploaded = send(idToClientTransferSocket[curClientID], chunk.c_str(), chunk.size(), 0);
+
+			// Error handling
+			if (bytesUploaded == SOCKET_ERROR)
+			{
+				std::cerr << std::format("Error at {}, error uploading file list json\n", __func__);
+				dropClient(curClientID);
+				return false;
+			}
+
+			// Increment the total bytes uploaded
+			totalRealBytesUploaded += bytesUploaded;
+		}
+
+		return true;
 		
 	}
 
@@ -586,13 +642,16 @@ private:
 		send(clientControlSocket, requestJson.dump().c_str(), requestJson.dump().size(), 0);
 
 		bytesReceived = recv(clientControlSocket, buffer, sizeof(buffer) - 1, 0);
+		string responseStr = buffer;
+		responseStr = responseStr.substr(0, responseStr.find(kCommandDelimiter));
+
 		if (bytesReceived == 0)
 		{
 			cout << format("Error at {}, client disconnected\n", __func__);
 			return false;
 		}
-		responseJson = nlohmann::json::parse(buffer);
-		if (!ifClientJsonValid(responseJson) || responseJson.value(jsFields.kMessage, "default phrase") != kClientHandShakePhrase)
+		responseJson = nlohmann::json::parse(responseStr);
+		if (/*!ifClientJsonValid(responseJson) ||*/ responseJson.value(jsFields.kMessage, "default phrase") != kClientHandShakePhrase)
 		{
 			cerr << format("Error at {}, client json is not valid\n", __func__);
 			dropClient(clientControlSocket);
@@ -615,15 +674,9 @@ private:
 		
 		DWORD socketTimeout = static_cast<DWORD>(chrono::duration_cast<chrono::milliseconds>(kTimeout).count());
 
-		while (!ifSuccess && chrono::duration_cast<chrono::seconds>(chrono::high_resolution_clock::now() - startStamp) < kTimeout)
+		while (!ifSuccess && chrono::duration_cast<chrono::seconds>(chrono::high_resolution_clock::now() - startStamp) < kTimeout && !ifExit.load())
 		{
-			clientTransferSocket = INVALID_SOCKET;
-
-			setsockopt(serverTransferSocket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<char*>(&socketTimeout), sizeof(socketTimeout));
-			clientTransferSocket = accept(serverTransferSocket, nullptr, nullptr);
-
-			socketTimeout = 0;
-			setsockopt(serverTransferSocket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<char*>(&socketTimeout), sizeof(socketTimeout));
+			clientTransferSocket = tryAcceptClientSocket(serverTransferSocket);
 			
 			if (clientTransferSocket == INVALID_SOCKET)
 				continue;
@@ -648,6 +701,12 @@ private:
 		if (!ifSuccess)
 		{
 			cout << format("Could not connect to transfer port, aborting..\n");
+		}
+		nlohmann::json serverJson = getServerJsonTemplate("", common::StatusCode::kStatusOK, uniqueID);
+		
+		if (SOCKET_ERROR == send(clientTransferSocket, serverJson.dump().c_str(), serverJson.dump().size(), 0))
+		{
+			return INVALID_SOCKET;
 		}
 
 		return clientTransferSocket;
@@ -682,6 +741,32 @@ private:
 		idToClintControlSocket.erase(curClientID);
 		alreadyUsedID.erase(curClientID);
 		
+	}
+
+	SOCKET tryAcceptClientSocket(const SOCKET& serverSocket)
+	{
+		SOCKET clientSocket = INVALID_SOCKET;
+
+		fd_set readfds;
+		FD_ZERO(&readfds);  // Initialize the set to be empty
+		FD_SET(serverSocket, &readfds);  // Add the listening socket to the set 
+		TIMEVAL tv;
+		tv.tv_sec = static_cast<long>(chrono::duration_cast<chrono::seconds>(kTimeout).count());
+		tv.tv_usec = 0;
+		int result = 0;
+
+		result = select(0, &readfds, nullptr, nullptr, &tv);
+
+		if (result > 0 && FD_ISSET(serverSocket, &readfds))
+		{
+			clientSocket = accept(serverSocket, nullptr, nullptr);
+		}
+		else if (result == SOCKET_ERROR)
+		{
+			cerr << format("Could not accept client at {}\n", __func__);
+			return INVALID_SOCKET;
+		}
+		return clientSocket;
 	}
 
 	static nlohmann::json getServerJsonTemplate(
@@ -729,7 +814,7 @@ private:
 	static inline regex validFileNamePattern = basic_regex<char>(R"(^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+)?$)");
 
 
-	static inline chrono::seconds kTimeout{ 5 };
+	static inline chrono::seconds kTimeout{ 2 };
 
 	static inline const JsonFields jsFields;
 	static inline const server_utils::DefaultJsonFields jsFieldsDefault;
@@ -793,14 +878,18 @@ chrono::system_clock::time_point getLastModifiedTime(const string& filePath)
 
 
 
-
-
-
-
-
 int main()
 {
-	auto ptr = ServerTcp::initServer();
+	auto result = ServerTcp::initServer();
+	shared_ptr<ServerTcp> ptr = result.value();
+	ptr->initSockets();
+	ptr->bindSockets(1234, 1235);
+	ptr->startListening();
+	this_thread::sleep_for(18923s);
+	ptr.~shared_ptr();  // without this line there is an exception ans select() does not stop in acceptConnection()
+
+	return 0;
+
 	
 
 	/*

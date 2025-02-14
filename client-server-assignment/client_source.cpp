@@ -193,7 +193,7 @@ public:
 			{
 				if (!responseJson.contains(jsFields.kMessage) || 
 					!responseJson.contains(jsFields.kStatusCode) ||
-					responseJson[jsFields.kMessage] != kServerConfirmationPhrase)
+					responseJson[jsFields.kMessage] != kServerHandShakePhrase)
 				{
 					cerr << format("Error at {}, wrong response\n", __func__);
 					return false;
@@ -229,6 +229,7 @@ public:
 		
 		nlohmann::json responseJson, requestJson = getClientJsonTemplate();
 		requestJson[jsFields.kUniqueID] = clientID;
+		requestJson[jsFields.kStatusCode] = StatusCode::kStatusOK;
 		string responseStr, requestStr = requestJson.dump();
 
 		serverAddr.sin_port = htons(serverTransferPort);
@@ -316,13 +317,13 @@ public:
 		switch (responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure))
 		{
 		case StatusCode::kStatusOK:
-			cout << "Starting transfering\n";
+			cout << format("Starting transfering file {}\n", fileName);
 			break;
 		case StatusCode::kStatusNotFound:
 			cerr << format("Error at {}, file not found {}", __func__, string(responseJson[jsFields.kStatusCode]));
 			return false;
 		case StatusCode::kStatusFailure:
-			cerr << format("Error at {}, server error {}", __func__, string(responseJson[jsFields.kStatusCode]));
+			cerr << format("Error at {}, server error, message {}", __func__, string(responseJson[jsFields.kMessage]));
 			return false;
 		default: 
 			cerr << format("Error at {}, unexpected status code\n", __func__);
@@ -457,7 +458,7 @@ public:
 			cout << "Start uploading:\n";
 			break;
 		default:
-			cout << "The status code was not OK\n";
+			cout << format("The status code was not OK, message: {}\n", responseJson.value(jsFields.kMessage, "_"));
 			return false;
 		}
 
@@ -661,7 +662,7 @@ private:
 
 		string resultListStr;
 
-		while ((bytesReceived = recv(clientTransferSocket, buffer, sizeof(buffer) - 1, 0)) && totalBytesReceived < static_cast<int>(listSize) && bytesReceived != 0)
+		while (totalBytesReceived < static_cast<int>(listSize) && (bytesReceived = recv(clientTransferSocket, buffer, sizeof(buffer) - 1, 0)) && bytesReceived != 0)
 		{
 			resultListStr += buffer;
 			totalBytesReceived += bytesReceived;
@@ -701,7 +702,7 @@ private:
 
 		ofstream newFile(fileName, ios::binary);
 		
-		while((bytesReceived = recv(clientTransferSocket, buffer, sizeof(buffer) - 1, 0)) && totalRealBytesReceived < fileSize && bytesReceived != 0)
+		while(totalRealBytesReceived < fileSize && (bytesReceived = recv(clientTransferSocket, buffer, sizeof(buffer) - 1, 0)) && bytesReceived != 0)
 		{
 			// string decodedStr = base64_decode(buffer);
 
@@ -735,7 +736,11 @@ private:
 			
 			// string encoded = base64_encode(string(buffer, bytesRead));
 
-			send(clientTransferSocket, buffer, bytesRead, 0);   // raw 
+			if (SOCKET_ERROR == send(clientTransferSocket, buffer, bytesRead, 0))   // raw 
+			{ 
+				cerr << format("Error uploading file, aborting\n");
+				return false;
+			}
 			memset(buffer, 0, sizeof(buffer));
 		}
 
@@ -796,6 +801,29 @@ SOCKET clientSocket = INVALID_SOCKET;
 
 int main()
 {
+	
+	auto result = ClientTcp::initClient();
+
+	shared_ptr<ClientTcp> ptr = result.value();
+
+	ptr->initSocket();
+	if (ptr->tryConnectToServer(1234, L"127.0.0.1"))
+	{
+		cout << "SUCCESS, connected\n";
+	};
+
+	if (ptr->getFileInfo("me.jpg"))
+	{
+		cout << "success info\n";
+	}
+	
+	// ptr->listCurDir();
+	ptr.~shared_ptr();
+	
+
+
+	return 0;
+
 
 
 	/*
