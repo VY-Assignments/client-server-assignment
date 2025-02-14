@@ -150,7 +150,7 @@ public:
 			return false;
 		}
 
-		wcout << format(L"SUCCESS, connected to {}:{},{}\n", serverIP, serverControlPort, serverTransferPort);
+		wcout << format(L"SUCCESS, connected to {}:{}, TransferPort: {}\n", serverIP, serverControlPort, serverTransferPort);
 		isConnected = true;
 		
 		return true;
@@ -417,7 +417,7 @@ public:
 		}
 		if (!fileToUpload)
 		{
-			cout << format("Could not open the file {}", fileName);
+			cout << format("Could not open the file {}\n", fileName);
 			return false;
 		}
 
@@ -556,7 +556,7 @@ public:
 
 		if (!responseJson.contains(jsFields.kStatusCode) || responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure) != StatusCode::kStatusOK)
 		{
-			cerr << format("Error at {}, status code was {}\n", __func__, responseJson.value(jsFields.kStatusCode, static_cast<int>(StatusCode::kStatusFailure)));
+			cerr << format("Status code was {}, message: {}\n", responseJson.value(jsFields.kStatusCode, static_cast<int>(StatusCode::kStatusFailure)), responseJson.value(jsFields.kMessage, ""));
 			dropAllConnections();
 			return false;
 		}
@@ -793,12 +793,6 @@ private:
 
 
 
-/*
-const int CLIENT_PORT = 12340;
-const PCWSTR SERVER_IP = L"127.0.0.1";
-SOCKET clientSocket = INVALID_SOCKET;
-*/
-
 int main()
 {
 	
@@ -811,8 +805,11 @@ int main()
 	{
 		cout << "SUCCESS, connected\n";
 	};
-
-	if (ptr->getFileInfo("me.jpg"))
+	if (ptr->putFile("abab.jpg"))
+	{
+		cout << "success put file\n";
+	}
+	if (ptr->getFileInfo("abab.jpg"))
 	{
 		cout << "success info\n";
 	}
@@ -824,129 +821,6 @@ int main()
 
 	return 0;
 
-
-
-	/*
-	ifstream file("hello.txt", ios::binary); 
-	if(!file)
-	{
-		exit(1);
-	}
-	char buffer[6];
-	int bytesRead;
-	string a;
-	while (file.read(a, 5) || file.gcount() > 0) {  // it does not put \0
-		bytesRead = file.gcount();
-		buffer[bytesRead] = '\0';
-		string encoded = base64_encode(buffer);
-		cout << encoded.size() << encoded.c_str() << endl;  // got to make -1
-		cout << base64_decode(encoded) << endl;
-	}
-
-	exit(0);
-	
-	char buffer[1024];
-	buffer[0] = 'a';
-	buffer[1] = 'b';
-	buffer[2] = '\0';
-	string encoded = base64_encode(buffer);
-	memset(buffer, 0, sizeof(buffer));
-	string b = base64_decode(encoded);
-	cout << b;
-
-	//char buffer[1024];
-	nlohmann::json jsonObj{ {"message", ""}, {"command", Command::kDefault}};
-	cout << jsonObj.dump() << endl;
-	//string a = jsonObj.dump() + " ";
-	if (jsonObj["command"] == Command::kDelete)  cout << "success" << endl;
-	string a = jsonObj.dump() + "     ";
-	unsigned char command = 0x12;
-	jsonObj["message"] = "hello world abacaba";
-	jsonObj["command"] = "";
-	jsonObj["statusCode"] = 200;
-	nlohmann::json jsobject2 = nlohmann::json::parse(a);
-	cout << jsobject2.dump() << endl;
-	cout << base64_encode(jsonObj.dump()) << " base 64 of the dump " << endl;
-
-	cout << base64_encode(jsonObj) << " base 64 of not dump " << endl;
-	cout << base64_decode(base64_encode(jsonObj.dump(), false)) << endl;
-	_getch();
-	exit(0);
-	*/
-	char buffer[1024];
-	// Initialize Winsock
-	WSADATA wsaData;
-	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
-	{
-		std::cerr << "WSAStartup failed" << std::endl;
-		return 1;
-	}
-
-	//char buffer[1023];
-	// Client configuration
-
-	int port = 12345;
-	PCWSTR serverIp = L"127.0.0.1";
-	SOCKET clientControlSocket = socket(AF_INET, SOCK_STREAM, 0);
-
-	if (clientControlSocket == INVALID_SOCKET)
-	{
-		std::cerr << "Error creating socket: " << WSAGetLastError() << std::endl;
-		cleanUpResources({});
-		return 1;
-	}
-	sockaddr_in serverAddr;
-	serverAddr.sin_family = AF_INET;
-	serverAddr.sin_port = htons(port);
-	InetPton(AF_INET, serverIp, &serverAddr.sin_addr);
-	// Connect to the server
-	// can be used to set timeout
-	DWORD timeout = 800; // 5 seconds
-	setsockopt(clientControlSocket, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
-
-	if (connect(clientControlSocket, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR)
-	{
-		std::cerr << "Connect failed with error: " << WSAGetLastError() << std::endl;
-		closesocket(clientControlSocket);
-		WSACleanup();
-		return 1;
-	}
-	// Send data to the server
-	ifstream file("photo.jpg", ios::binary);
-	const size_t kChunkSize = 1024;
-	int bytesRead = 0, totalRealBytesUploaded = 0;
-
-	//char buffer[1024];
-	memset(buffer, 0, sizeof(buffer));
-
-	while (file.read(buffer, kChunkSize - 1) || file.gcount() > 0)
-	{
-		bytesRead = file.gcount();
-		totalRealBytesUploaded += bytesRead;
-
-		string encoded = base64_encode(string(buffer, bytesRead));
-
-		send(clientControlSocket, buffer, bytesRead, 0);   // raw unterminated 
-		memset(buffer, 0, sizeof(buffer));
-	}
-	/*
-	for (int counter = 0; counter < 10; counter ++)
-	{
-		string message = format("Hello, server! How are you? {}", counter);
-		send(clientControlSocket, message.c_str(), (int)message.size(), 0);
-	}*/
-	// Receive the response from the server
-	//char buffer[1024];
-	memset(buffer, 0, sizeof(buffer));
-	int bytesReceived = recv(clientControlSocket, buffer, sizeof(buffer) - 1, 0);
-	if (bytesReceived > 0)
-	{
-		std::cout << "Received from server: " << string(buffer) << std::endl;
-	}
-	// Clean up
-	closesocket(clientControlSocket);
-	WSACleanup();
-	return 0;
 }
 
 
