@@ -251,9 +251,8 @@ public:
 
 		}
 
-
 		~ServerTcp()
-		{  	
+		{
 			ifExit = true;
 
 			dropAllConnections();
@@ -272,6 +271,12 @@ public:
 
 		}
 
+
+
+private:
+
+	friend class shared_ptr<ServerTcp>;
+	
 	explicit ServerTcp()
 	{
 		serverAddr.sin_family = AF_INET;
@@ -279,9 +284,7 @@ public:
 
 	}
 
-private:
-
-	friend class shared_ptr<ServerTcp>;
+	
 	void dropAllConnections()   // not a thread - safe operation
 	{
 		shutdown(serverControlSocket, SD_BOTH);
@@ -352,6 +355,7 @@ private:
 
 			bytesReceived = recv(clientControlSocket, buffer, sizeof(buffer), 0);
 		}
+		dropClient(curClientID);
 	}
 
 	bool handleGetFromServer(const nlohmann::json& clientJson, const int& curClientID)
@@ -392,11 +396,11 @@ private:
 		const string fileName = clientJson.value(jsFields.kArgument, "");
 		const string filePath = kDefaultDir + "/" + fileName;
 
-		if (ifFileNameValid(fileName) && fileExists(filePath))
+		if (!ifFileNameValid(fileName) || !fileExists(filePath))
 		{
 			cout << format("Error at {} in request by user {}, file name Invalid or file not found\n", __func__, curClientID);
 
-			auto serverJsonStr = string(getServerJsonTemplate(format("Error in request by user {}, file name Invalid or file not found", curClientID), common::StatusCode::kStatusFailure, curClientID)) + kCommandDelimiter;
+			auto serverJsonStr = getServerJsonTemplate(format("Error in request, file name Invalid or file not found"), common::StatusCode::kStatusFailure, curClientID).dump() + kCommandDelimiter;
 			send(idToClintControlSocket[curClientID], (serverJsonStr).c_str(), serverJsonStr.size(), 0);
 
 			return false;
@@ -601,17 +605,6 @@ private:
 
 		return true;
 		
-	}
-
-
-	bool tryHandShake()
-	{
-		// GOT to make the client init them by nick, not by id (will implemnt it in 4 assignment)
-		nlohmann::json requestJson = getServerJsonTemplate();
-		
-
-
-
 	}
 
 	int generateUniqueId() 
@@ -848,35 +841,8 @@ private:
 
 	unordered_set<long long> alreadyUsedID;
 
-	vector<thread> clientsThreadVec;
-
-
-	
+	vector<thread> clientsThreadVec;	
 };
-
-
-/*
-chrono::system_clock::time_point getLastModifiedTime(const string& filePath) 
-{
-	if (!filesystem::exists(filePath)) 
-	{
-		cerr << "File does not exist!\n";
-		return chrono::system_clock::time_point{};  // Return an empty (epoch) time_point
-	}
-
-	auto ftime = filesystem::last_write_time(filePath);
-	auto systemTime = chrono::time_point_cast<chrono::system_clock::duration>(ftime - filesystem::file_time_type::clock::now() + chrono::system_clock::now());
-
-	return systemTime;
-}
-*/
-
-
-
-
-
-
-
 
 int main()
 {
@@ -890,88 +856,4 @@ int main()
 
 	return 0;
 
-	
-
-	/*
-	//listDir();
-	//getLastModifiedTime("./");
-	return 0;
-	// Initialize Winsock
-	WSADATA wsaData;
-	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
-	{
-		std::cerr << "WSAStartup failed" << std::endl;
-		return 1;
-	}
-	// Server configuration
-	int port = 12345;
-	SOCKET serverSocket = socket(AF_INET, SOCK_STREAM, 0);
-	if (serverSocket == INVALID_SOCKET)
-	{
-		std::cerr << "Error creating socket: " << WSAGetLastError() << std::endl;
-		WSACleanup();
-		return 1;
-	}
-	sockaddr_in serverAddr;
-	serverAddr.sin_family = AF_INET;
-	serverAddr.sin_addr.s_addr = INADDR_ANY;
-	serverAddr.sin_port = htons(port);
-	// Bind the socket
-	if (::bind(serverSocket, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR)
-	{
-		std::cerr << "Bind failed with error: " << WSAGetLastError() << std::endl;
-		closesocket(serverSocket);
-		WSACleanup();
-		return 1;
-	}
-	// Listen for incoming connections
-	if (listen(serverSocket, SOMAXCONN) == SOCKET_ERROR)
-	{
-		std::cerr << "Listen failed with error: " << WSAGetLastError() << std::endl;
-		closesocket(serverSocket);
-		WSACleanup();
-		return 1;
-	}
-	std::cout << "Server listening on port " << port << std::endl;
-	// Accept a client connection
-	SOCKET clientControlSocket = accept(serverSocket, nullptr, nullptr);
-	if (clientControlSocket == INVALID_SOCKET)
-	{
-		std::cerr << "Accept failed with error: " << WSAGetLastError() << std::endl;
-		closesocket(serverSocket);
-		WSACleanup();
-		return 1;
-	}
-	// Receive data from the client
-	char buffer[1024];
-	DWORD timeout = 800; // 5 seconds
-	setsockopt(clientControlSocket, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
-	ofstream file("photo1.jpg", ios::binary);
-	while(true)
-	{
-		memset(buffer, 0, sizeof(buffer));
-		int bytesReceived = recv(clientControlSocket, buffer, sizeof(buffer) - 1, 0);
-		if (bytesReceived > 0)
-		{
-			file.write(buffer, bytesReceived);
-
-			std::cout << "Received data: " << buffer << std::endl;
-			// Send a response back to the client
-			
-		}
-		else
-		{
-			string response = "Hello, client! This is the server.";
-			send(clientControlSocket, response.c_str(), (int)response.size(), 0);
-			break;
-		}
-	}
-
-	
-	// Clean up
-	closesocket(clientControlSocket);
-	closesocket(serverSocket);
-	WSACleanup();
-	return 0;
-	*/
 }
