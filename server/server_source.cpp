@@ -417,7 +417,7 @@ private:
 		{
 			cout << format("Error at {} in request by user {}, file name Invalid or file not found\n", __func__, curClientID);
 
-			auto serverJsonStr = getServerJsonTemplate(format("Error in request, file name Invalid or file not found"), common::StatusCode::kStatusFailure, curClientID).dump() + kCommandDelimiter;
+			auto serverJsonStr = getServerJsonTemplate(format("Error in request, file name Invalid or file not found"), common::StatusCode::kStatusNotFound, curClientID).dump() + kCommandDelimiter;
 			send(sessionIDToClientControlSocket[curClientID], (serverJsonStr).c_str(), serverJsonStr.size(), 0);
 
 			return false;
@@ -725,7 +725,7 @@ private:
 			ifCurNickNameUsed = curLoginedUsersNamesSet.contains(curNickName);
 		}
 		
-		if (true)
+		if (ifCurNickNameUsed)
 		{
 			cerr << format("Name {} is already used, drop new client\n", curNickName);
 			closesocket(clientControlSocket);

@@ -412,7 +412,7 @@ public:
 			cout << format("File {} not found on server\n", fileName);
 			return false;
 		default:
-			cerr << format("Error at {}, status code was {}\n", __func__, string(responseJson[jsFields.kStatusCode]));
+			cerr << format("Error at {}, status code was {}\n", __func__, responseJson.value(jsFields.kStatusCode, static_cast<int>(StatusCode::kStatusFailure)));
 			break;
 		}
 
