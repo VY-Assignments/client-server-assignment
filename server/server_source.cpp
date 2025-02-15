@@ -221,7 +221,7 @@ public:
 
 				if (clientControlSocket == INVALID_SOCKET)
 				{
-					cerr << format("Error at {}, could not accept client\n", __func__);
+					//cerr << format("Error at {}, could not accept client\n", __func__);
 					continue;
 				}
 
