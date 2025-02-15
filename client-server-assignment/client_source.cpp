@@ -181,8 +181,8 @@ public:
 			
 			if (bytesReceived == 0)
 			{
-				dropAllConnections();
 				cout << format("Error at {}, server dropped connection\n", __func__);
+				dropAllConnections();
 				return false;
 			}
 			
@@ -235,38 +235,53 @@ public:
 		serverAddr.sin_port = htons(serverTransferPort);
 		InetPton(AF_INET, serverIP, &serverAddr.sin_addr);
 
-		while (connect(clientTransferSocket, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR && retryCounter <= kMaxRetryCounter)
+		while (retryCounter < kMaxRetryCounter)
 		{
-			cerr << format("Error at {}, connection to transfer port failed with error: {}, Retrying...\n", __func__, WSAGetLastError());
-			this_thread::sleep_for(100ms);	
-			retryCounter++;
-			if (retryCounter == kMaxRetryCounter)
+			if (connect(clientTransferSocket, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR && retryCounter <= kMaxRetryCounter)
 			{
+				cerr << format("Error at {}, connection to transfer port failed with error: {}, Retrying...\n", __func__, WSAGetLastError());
+				this_thread::sleep_for(100ms);
+				retryCounter++;
+				if (retryCounter == kMaxRetryCounter)
+				{
+					dropAllConnections();
+					return false;
+				}
+				continue;
+			}
+
+			send(clientTransferSocket, requestStr.c_str(), requestStr.size(), 0);
+
+			bytesReceived = recv(clientTransferSocket, buffer, (int)sizeof(buffer) - 1, 0);
+
+			if (bytesReceived == 0)
+			{
+				cerr << format("Error at {}, problem connecting to server transfer port\n", __func__);
+				
+				retryCounter++;
+				if (retryCounter < kMaxRetryCounter)
+				{
+					cerr << "Trying to reconnect to server transfer port...\n";
+					this_thread::sleep_for(100ms);
+					closesocket(clientTransferSocket);
+					continue;
+				}
+				dropAllConnections();
 				return false;
 			}
-		}
 
-		send(clientTransferSocket, requestStr.c_str(), requestStr.size(), 0);
+			string response = buffer;
+			responseJson = nlohmann::json::parse(response.substr(0, response.find(kCommandDelimiter)));
 
-		bytesReceived = recv(clientTransferSocket, buffer, (int)sizeof(buffer) - 1, 0); 
-
-		if(bytesReceived == 0)
-		{
-			cerr << format("Error at {}, received 0 bytes, closing connection\n", __func__);
-			dropAllConnections();
-			return false;
+			if (responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure) != StatusCode::kStatusOK)
+			{
+				cerr << format("Error ar {}, the status code was {}", __func__, responseJson.value(jsFields.kStatusCode, "Unknown"));
+				return false;
+			}
+			return true;
 		}
 		
-		string response = buffer;
-		responseJson = nlohmann::json::parse(response.substr(0, response.find(kCommandDelimiter)));
-		
-		if (responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure) != StatusCode::kStatusOK)
-		{
-			cerr << format("Error ar {}, the status code was {}", __func__, responseJson.value(jsFields.kStatusCode, "Unknown"));
-			return false;
-		}
-
-		return true;
+		//return true;
 	}
 
 	bool getFile(string fileName)
@@ -557,7 +572,7 @@ public:
 		if (!responseJson.contains(jsFields.kStatusCode) || responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure) != StatusCode::kStatusOK)
 		{
 			cerr << format("Status code was {}, message: {}\n", responseJson.value(jsFields.kStatusCode, static_cast<int>(StatusCode::kStatusFailure)), responseJson.value(jsFields.kMessage, ""));
-			dropAllConnections();
+			//dropAllConnections();
 			return false;
 		}
 
@@ -817,7 +832,7 @@ int main()
 	// ptr->listCurDir();
 	ptr.~shared_ptr();
 	
-
+	_getch();
 
 	return 0;
 
