@@ -279,7 +279,7 @@ public:
 
 			if (responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure) != StatusCode::kStatusOK)
 			{
-				cerr << format("Error ar {}, the status code was {}", __func__, responseJson.value(jsFields.kStatusCode, "Unknown"));
+				cerr << format("Error ar {}, the status code was {}\n", __func__, responseJson.value(jsFields.kStatusCode, "Unknown"));
 				return false;
 			}
 			return true;
@@ -526,7 +526,7 @@ public:
 		
 		if (!responseJson.contains(jsFields.kStatusCode) || !responseJson.contains(jsFields.kFileSize))
 		{
-			cerr << format("Error at {}, status code was {}", __func__, responseJson.value(jsFields.kStatusCode, static_cast<int>(StatusCode::kStatusFailure)));
+			cerr << format("Error at {}, status code was {}\n", __func__, responseJson.value(jsFields.kStatusCode, static_cast<int>(StatusCode::kStatusFailure)));
 			return false;
 		}
 		
