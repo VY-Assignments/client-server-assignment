@@ -263,7 +263,7 @@ public:
 		
 		if (responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure) != StatusCode::kStatusOK)
 		{
-			cerr << format("Error ar {}, the status code was {}", __func__, responseJson.value(jsFields.kStatusCode, "Unknown"));
+			cerr << format("Error ar {}, the status code was {}\n", __func__, responseJson.value(jsFields.kStatusCode, "Unknown"));
 			return false;
 		}
 
