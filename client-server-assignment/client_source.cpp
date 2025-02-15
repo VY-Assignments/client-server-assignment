@@ -558,7 +558,6 @@ public:
 		if (!responseJson.contains(jsFields.kStatusCode) || responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure) != StatusCode::kStatusOK)
 		{
 			cerr << format("Status code was {}, message: {}\n", responseJson.value(jsFields.kStatusCode, static_cast<int>(StatusCode::kStatusFailure)), responseJson.value(jsFields.kMessage, ""));
-			dropAllConnections();
 			return false;
 		}
 
@@ -599,6 +598,8 @@ private:
 			cout << fileName << "\t";
 			if (counter % 2 == 0)	cout << endl;
 		}
+		if (counter % 2 != 0)
+			cout << endl;
 	}
 	static inline void printFileInfo(const string& fileName, const nlohmann::json& fileInfo)
 	{
