@@ -8,6 +8,8 @@
 #include <format>
 #include <thread>
 #include <fstream>
+#include <regex>
+#include <sstream>
 #include "json.hpp"
 #include "base64.h"
 
@@ -37,16 +39,16 @@ enum class Command : int
 	kPut,
 	kDelete,
 	kInfo,
+	kExit,
 	kDefault
-
 };
 
 enum class StatusCode : int 
 {
-	kStatusOK = 200,
+	kStatusOK		= 200,
 	kStatusNotFound = 404,
-	kStatusCreated = 201, 
-	kStatusFailure = 500
+	kStatusCreated  = 201, 
+	kStatusFailure  = 500
 };
 
 struct JsonFields 
@@ -61,6 +63,7 @@ struct JsonFields
 	const string kFileSize		= "fileSize";
 	const string kFileNames		= "fileNames";
 	const string kFileInfo		= "fileInfo";
+	const string kNickname		= "nickname";
 };
 
 
@@ -68,7 +71,7 @@ class ClientTcp
 {
 public:
 
-	static optional<shared_ptr<ClientTcp>> initClient()
+	static optional<shared_ptr<ClientTcp>> initClient(const string clientName)
 	{
 		if (thisClientPtr != nullptr)
 		{
@@ -88,7 +91,7 @@ public:
 		}
 
 		isLibLoaded = true;
-		thisClientPtr = shared_ptr<ClientTcp>(new ClientTcp());
+		thisClientPtr = shared_ptr<ClientTcp>(new ClientTcp(clientName));
 
 		return thisClientPtr;
 	}
@@ -106,7 +109,7 @@ public:
 		return true;
 	}
 	
-	bool tryConnectToServer(const int serverControlPort, const PCWSTR serverIP) noexcept  // extend it so it would also init the additional server socket
+	bool tryConnectToServer(const int serverControlPort, const PCWSTR serverIP) noexcept  
 	{
 		if (isConnected)
 		{
@@ -136,7 +139,7 @@ public:
 		
 		if (!tryHandShake())
 		{
-			cerr << format("Error at {}, server does not follow handshake\n", __func__);
+			cerr << format("Error at {}, server does not follow handshake or the NickName is curently used\n", __func__);
 			isConnected = false;
 			dropAllConnections();
 			return false;
@@ -171,6 +174,7 @@ public:
 		nlohmann::json responseJson, requestJson = getClientJsonTemplate();
 		requestJson[jsFields.kMessage] = kClientHandShakePhrase;
 		requestJson[jsFields.kVersion] = kClientVersion;
+		requestJson[jsFields.kNickname] = kClientName;
 
 		string requestStr = requestJson.dump() + kCommandDelimiter;
 		
@@ -298,7 +302,7 @@ public:
 			return false;
 		}
 
-		char buffer[1024];
+		char buffer[2024];
 		memset(buffer, 0, sizeof(buffer));
 
 		nlohmann::json responseJson, requestJson = getClientJsonTemplate();
@@ -590,7 +594,7 @@ public:
 		}
 	}
 private:
-	ClientTcp() {}
+	ClientTcp(const string clientName) : kClientName(clientName) {}
 
 	static inline const string encodeJsonToBase64(const nlohmann::json& jsObjectToEncode) 
 	{
@@ -624,6 +628,9 @@ private:
 			cout << fileName << "\t";
 			if (counter % 2 == 0)	cout << endl;
 		}
+
+		if (counter == 1) 
+			cout << endl;
 	}
 	static inline void printFileInfo(const string& fileName, const nlohmann::json& fileInfo)
 	{
@@ -788,9 +795,8 @@ private:
 	static inline const int    kMinFileNameSize			 = 1;
 	static inline shared_ptr<ClientTcp>	thisClientPtr	 = nullptr;
 
-
 	static inline const JsonFields jsFields;
-
+	const string kClientName;
 
 	
 
@@ -808,30 +814,183 @@ private:
 
 
 
+
+class Program
+{
+private:
+	shared_ptr<ClientTcp> client;
+
+public:
+	void start()
+	{
+		int port;
+		wstring serverIP;
+		string name;
+
+		cout << "Enter server IP: ";
+		wcin >> serverIP;
+		cout << "Enter the name: ";
+		cin >> name;
+		cout << "Enter server control port: ";
+		cin >> port;
+
+		auto clientOpt = ClientTcp::initClient(name);
+		if (!clientOpt)
+		{
+			cerr << "Failed to initialize client.\n";
+			return;
+		}
+		client = clientOpt.value();
+
+		if (!client->tryConnectToServer(port, serverIP.c_str()))
+		{
+			return;
+		}
+
+		string input;
+		getline(cin, input); // to get rid of \n
+
+		promptCommands();
+	}
+
+private:
+	void promptCommands()
+	{
+		string input;
+
+		while (true)
+		{
+			cout << "> ";
+			getline(cin, input);
+			
+			input = input.substr(0, input.find('\n'));
+
+			Command command = handleCommand(input);
+			if (command == Command::kDefault)
+			{
+				cout << "Unknown command. Available commands: put, get, delete, info, list, exit.\n";
+				continue;
+			}
+
+			if (command == Command::kExit)  
+				break;
+
+			executeCommand(command, input);
+		}
+	}
+
+	Command handleCommand(const string& input)
+	{
+		
+		if (regex_match(input, putPattern))
+			return Command::kPut;
+		
+		else if (regex_match(input, getPattern))
+			return Command::kGet;
+		
+		else if (regex_match(input, deletePattern))
+			return Command::kDelete;
+		
+		else if (regex_match(input, infoPattern))
+			return Command::kInfo;
+		
+		else if (regex_match(input, listPattern))
+			return Command::kList;
+		
+		else if (input == "exit")
+			return Command::kExit;  // Handle exit command
+		
+
+		return Command::kDefault;  // Default for unrecognized commands
+	}
+
+	void executeCommand(const Command command, const string& input)
+	{
+		
+		switch (command)
+		{
+		case Command::kPut:
+		{
+			smatch match;
+			regex_search(input, match, regex(R"(^put\s+(.+)$)"));
+			client->putFile(match[1]);
+			break;
+		}
+		case Command::kGet:
+		{
+			smatch match;
+			regex_search(input, match, regex(R"(^get\s+(.+)$)"));
+			client->getFile(match[1]);
+			break;
+		}
+		case Command::kDelete:
+		{
+			smatch match;
+			regex_search(input, match, regex(R"(^delete\s+(.+)$)"));
+			client->deleteFileRemote(match[1]);
+			break;
+		}
+		case Command::kInfo:
+		{
+			smatch match;
+			regex_search(input, match, regex(R"(^info\s+(.+)$)"));
+			client->getFileInfo(match[1]);
+			break;
+		}
+		case Command::kList:
+			client->listCurDir();
+			break;
+		default:
+			cout << "Invalid command.\n";
+			break;
+		}
+	}
+
+	static inline const regex putPattern = basic_regex<char>(R"(^put\s+(.+)$)");
+	static inline const regex getPattern = basic_regex<char>(R"(^get\s+(.+)$)");
+	static inline const regex deletePattern = basic_regex<char>(R"(^delete\s+(.+)$)");
+	static inline const regex infoPattern = basic_regex<char>(R"(^info\s+(.+)$)");
+	static inline const regex listPattern = basic_regex<char>(R"(^list\s*$)");
+
+};
+
+
+
 int main()
 {
-	
+	Program prog;
+	prog.start();
+
+
+
+
+
+	/*
 	auto result = ClientTcp::initClient();
 
 	shared_ptr<ClientTcp> ptr = result.value();
 
+	
 	ptr->initSocket();
 	if (ptr->tryConnectToServer(1234, L"127.0.0.1"))
 	{
 		cout << "SUCCESS, connected\n";
 	};
-	if (ptr->putFile("abab.jpg"))
+	if (ptr->putFile("hello.txt"))
 	{
 		cout << "success put file\n";
 	}
-	if (ptr->getFileInfo("abab.jpg"))
+	if (ptr->putFile("me.jpg"))
+	{
+		cout << "success put file\n";
+	}
+	if (ptr->getFileInfo("me.jpg"))
 	{
 		cout << "success info\n";
-	}
 	
-	// ptr->listCurDir();
+	ptr->listCurDir();
 	ptr.~shared_ptr();
-	
+	*/
 	_getch();
 
 	return 0;
