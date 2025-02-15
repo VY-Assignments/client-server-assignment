@@ -79,17 +79,17 @@ namespace server_utils
 
 struct JsonFields
 {
-	const string kMessage = "message";
-	const string kStatusCode = "statusCode";
-	const string kTransferPort = "transferPort";
-	const string kCommand = "command";
-	const string kArgument = "argument";
-	const string kVersion = "version";
-	const string kUniqueID = "uniqueID";
-	const string kFileSize = "fileSize";
-	const string kFileNames = "fileNames";
-	const string kFileInfo = "fileInfo";
-	const string kNickname = "nickname";
+	const string kMessage		 = "message";
+	const string kStatusCode	 = "statusCode";
+	const string kTransferPort	 = "transferPort";
+	const string kCommand		 = "command";
+	const string kArgument		 = "argument";
+	const string kVersion		 = "version";
+	const string kUniqueID		 = "uniqueID";
+	const string kFileSize		 = "fileSize";
+	const string kFileNames		 = "fileNames";
+	const string kFileInfo		 = "fileInfo";
+	const string kNickname		 = "nickname";
 	const string kUsersNicknames = "user_nicknames";
 };
 
@@ -105,7 +105,7 @@ vector<string> listDir(string directoryPath = ".")
 
 	for (auto& entry : std::filesystem::directory_iterator(directoryPath))
 	{
-		result.push_back(entry.path().filename().string());  // Print only the file name
+		result.push_back(entry.path().filename().string());  // print only the file name
 	}
 	return result;
 }
@@ -113,7 +113,7 @@ vector<string> listDir(string directoryPath = ".")
 class ServerTcp
 {
 public:
-	static optional<shared_ptr<ServerTcp>/*<ServerTcp**/> initServer(string configName = "config.txt")
+	static optional<shared_ptr<ServerTcp>> initServer(string configName = "config.txt")
 	{
 		if (thisServerPtr != nullptr)
 		{
@@ -214,40 +214,18 @@ public:
 
 				if (clientControlSocket == INVALID_SOCKET)
 				{
-					cerr << format("Error at {}, could not accept client\n", __func__);
+					// cerr << format("Error at {}, could not accept client\n", __func__);
 					continue;
 				}
 
 				int curClientID = generateUniqueId();
 
-				// ------ here got to start another thread for async accept of new clients, handleNewConnection() 
-				/*
-				if (!handleClientHandshake(clientControlSocket, curClientID))
-				{
-					cout << format("Error at {}, handshake failed with error {}\n", __func__, WSAGetLastError());
-					continue;
-				}
-
-				clientTransferSocket = acceptNewTransferConnection(curClientID);
-				if (clientTransferSocket == INVALID_SOCKET)
-				{
-					dropClient(curClientID);
-					continue;
-				}
-
-				sessionIDToClientControlSocket[curClientID] = clientControlSocket;
-				sessionIDToClientTransferSocket[curClientID] = clientTransferSocket;
-
-				handleClient(curClientID);
-				*/ 
 				clientsThreadVec.emplace_back([this, clientControlSocket, curClientID]()
 					{
 						handleNewControlConnection(clientControlSocket, curClientID);
 					});
 
 			}
-
-
 		}
 
 		void handleNewControlConnection(SOCKET clientControlSocket, const int curClientID) 
@@ -260,7 +238,8 @@ public:
 			}
 			
 			{
-				scoped_lock lock(sessionIDToControlSocketMapMtx, sessionWaitingForTransferMtx);
+				scoped_lock lock(sessionIDToNickNameMapMtx, curLoginedUsersSetMtx, sessionIDToControlSocketMapMtx, sessionWaitingForTransferMtx);
+				curLoginedUsersNamesSet.insert(sessionIDToNickNameMap[curClientID]);
 				sessionIDToClientControlSocket[curClientID] = clientControlSocket;
 				sessionsWaitingForTransferConnection.insert(curClientID);
 			}
@@ -412,6 +391,9 @@ private:
 			case common::Command::kList:
 				result = handleListDir(clientJson, curClientID);
 				break;
+			case common::Command::kDelete:
+				result = handleDeleteFile(clientJson, curClientID);
+				break;
 			default:
 				cerr << format("Error at {}, command not implemented", __func__);
 				break;
@@ -423,13 +405,46 @@ private:
 			//bytesReceived = recv(clientControlSocket, buffer, sizeof(buffer), 0);
 		}
 		dropClient(curClientID);
+		cout << format("Client {} disconnected, session closed\n", curClientID);
 	}
+
+	bool handleDeleteFile(nlohmann::json clientJson, const int curClientID)
+	{
+		const string fileName = clientJson.value(jsFields.kArgument, "");
+		const string filePath = sessionIDToNickNameMap[curClientID] + "/" + fileName;
+
+		if (!ifFileNameValid(fileName) || !fileExists(filePath))
+		{
+			cout << format("Error at {} in request by user {}, file name Invalid or file not found\n", __func__, curClientID);
+
+			auto serverJsonStr = getServerJsonTemplate(format("Error in request, file name Invalid or file not found"), common::StatusCode::kStatusFailure, curClientID).dump() + kCommandDelimiter;
+			send(sessionIDToClientControlSocket[curClientID], (serverJsonStr).c_str(), serverJsonStr.size(), 0);
+
+			return false;
+		}
+		try 
+		{
+			filesystem::remove(filePath);
+		}
+		catch (const filesystem::filesystem_error& e) 
+		{
+			cerr << format("Error at {} deleting file: {}, by client {}\n", __func__, e.what(), curClientID);
+			auto serverJsonStr = getServerJsonTemplate(format("Error deleting file: {}", e.what()), common::StatusCode::kStatusFailure, curClientID).dump() + kCommandDelimiter;
+			send(sessionIDToClientControlSocket[curClientID], (serverJsonStr).c_str(), serverJsonStr.size(), 0);
+			return false;
+		}
+		auto serverJsonStr = getServerJsonTemplate("", common::StatusCode::kStatusOK, curClientID).dump() + kCommandDelimiter;
+		send(sessionIDToClientControlSocket[curClientID], (serverJsonStr).c_str(), serverJsonStr.size(), 0);
+		
+		return true;
+	}
+
 
 	bool handleGetFromServer(const nlohmann::json& clientJson, const int& curClientID)
 	{
 		const string fileName = clientJson.value(jsFields.kArgument, "");
 		
-		const string filePath = sessionIDToNickName[curClientID] + "/" + fileName;
+		const string filePath = sessionIDToNickNameMap[curClientID] + "/" + fileName;
 
 		bool a = ifFileNameValid(fileName);
 		bool b = fileExists(filePath);
@@ -437,7 +452,7 @@ private:
 		{
 			cerr << format("Error at {} in request by user {}, file name Invalid or Empty\n", __func__, curClientID);
 
-			auto serverJsonStr = string(getServerJsonTemplate(format("Error in request by user {}, invalid file name or file not found", curClientID), common::StatusCode::kStatusFailure, curClientID)) + kCommandDelimiter;
+			auto serverJsonStr = getServerJsonTemplate(format("Error in request by user {}, invalid file name or file not found", curClientID), common::StatusCode::kStatusFailure, curClientID).dump() + kCommandDelimiter;
 			send(sessionIDToClientControlSocket[curClientID], (serverJsonStr).c_str(), serverJsonStr.size(), 0);	
 			
 			return false;
@@ -465,7 +480,7 @@ private:
 	bool handleGetFileInfo(const nlohmann::json& clientJson, const int& curClientID)
 	{
 		const string fileName = clientJson.value(jsFields.kArgument, "");
-		const string filePath = sessionIDToNickName[curClientID] + "/" + fileName;
+		const string filePath = sessionIDToNickNameMap[curClientID] + "/" + fileName;
 
 		if (!ifFileNameValid(fileName) || !fileExists(filePath))
 		{
@@ -534,7 +549,7 @@ private:
 		
 		if (clientJson.value(jsFields.kArgument, "") == jsFieldsDefault.kArgument || 
 			clientJson.value(jsFields.kFileSize, -1)  == jsFieldsDefault.kFileSize || 
-			fileExists(sessionIDToNickName[curClientID] + "/" + clientJson.value(jsFields.kArgument, "")))
+			fileExists(sessionIDToNickNameMap[curClientID] + "/" + clientJson.value(jsFields.kArgument, "")))
 		{
 			cerr << format("Error at {}, invalid file size or file name or file already exists\n", __func__);
 			string serverJsonStr = getServerJsonTemplate("Error, invalid file size, name or file already exists", common::StatusCode::kStatusFailure, curClientID).dump() + kCommandDelimiter;
@@ -551,7 +566,7 @@ private:
 			return false;
 		}
 		
-		string curDir = sessionIDToNickName[curClientID];
+		string curDir = sessionIDToNickNameMap[curClientID];
 
 		if (!filesystem::exists(curDir))
 		{
@@ -574,7 +589,7 @@ private:
 		int bytesReceived = 0, totalRealBytesReceived = 0;
 
 		char buffer[1024]; 
-		string dir = sessionIDToNickName[curClientID], filePath = dir + "/" + fileName;
+		string dir = sessionIDToNickNameMap[curClientID], filePath = dir + "/" + fileName;
 
 		ofstream newFile(filePath, ios::binary);
 
@@ -590,7 +605,7 @@ private:
 
 	bool handleListDir(nlohmann::json clientJson, const int curClientID)
 	{
-		string dir = sessionIDToNickName[curClientID];
+		string dir = sessionIDToNickNameMap[curClientID];
 
 		if (!filesystem::exists(dir))
 		{
@@ -698,11 +713,25 @@ private:
 			/*|| !responseJson.contains(jsFields.kNickname) */ )
 		{
 			cerr << format("Error at {}, client json is not valid\n", __func__);
-			dropClient(clientControlSocket);
+			closesocket(clientControlSocket);
 			return false;
 		}
 
-		string curNickName = responseJson.value(jsFields.kNickname, jsFieldsDefault.kNickname);		
+		string curNickName = responseJson.value(jsFields.kNickname, jsFieldsDefault.kNickname);	
+		
+		bool ifCurNickNameUsed = false;
+		{
+			lock_guard lock(curLoginedUsersSetMtx);
+			ifCurNickNameUsed = curLoginedUsersNamesSet.contains(curNickName);
+		}
+		
+		if (true)
+		{
+			cerr << format("Name {} is already used, drop new client\n", curNickName);
+			closesocket(clientControlSocket);
+			return false;
+		}
+
 
 		requestJson = getServerJsonTemplate("", common::StatusCode::kStatusOK, uniqueID);
 		requestJson[jsFields.kTransferPort] = serverTransferPort;
@@ -715,7 +744,7 @@ private:
 
 		{
 			scoped_lock lock(sessionIDToNickNameMapMtx, userNickNamesSetMtx);
-			sessionIDToNickName[uniqueID] = (responseJson.value(jsFields.kNickname, jsFieldsDefault.kNickname) == jsFieldsDefault.kNickname) ? kDefaultDir : string(responseJson[jsFields.kNickname]);
+			sessionIDToNickNameMap[uniqueID] = (responseJson.value(jsFields.kNickname, jsFieldsDefault.kNickname) == jsFieldsDefault.kNickname) ? kDefaultDir : string(responseJson[jsFields.kNickname]);
 			userNickNamesSet.insert(curNickName);
 		}
 		
@@ -725,8 +754,6 @@ private:
 	void acceptNewTransferConnection(/*const int uniqueID*/)  // if I accept multiple clients on transfer port in multiple threads, I need a mutex and a notifier to notify the waiting thread that the client has connected or that the timeou thas passed
 	{
 		SOCKET clientTransferSocket = INVALID_SOCKET;
-			
-		//auto startStamp = chrono::high_resolution_clock::now();	
 	
 		while (!ifExit.load())
 		{
@@ -881,14 +908,15 @@ private:
 
 	void dropClient(const int curClientID)
 	{
-		scoped_lock compositeLock(sessionIDToControlSocketMapMtx, sessionIDToTransferSocketMapMtx, sessionIDToNickNameMapMtx, sessionWaitingForTransferMtx, alreadyUsedSessionIDSetMtx);
+		scoped_lock compositeLock(curLoginedUsersSetMtx, sessionIDToControlSocketMapMtx, sessionIDToTransferSocketMapMtx, sessionIDToNickNameMapMtx, sessionWaitingForTransferMtx, alreadyUsedSessionIDSetMtx);
 
 		closesocket(sessionIDToClientControlSocket[curClientID]);
 		closesocket(sessionIDToClientTransferSocket[curClientID]);
 		
+		curLoginedUsersNamesSet.erase(sessionIDToNickNameMap[curClientID]);
 		sessionIDToClientTransferSocket.erase(curClientID);
 		sessionIDToClientControlSocket.erase(curClientID);
-		sessionIDToNickName.erase(curClientID);
+		sessionIDToNickNameMap.erase(curClientID);
 		sessionsWaitingForTransferConnection.erase(curClientID);
 		alreadyUsedIDSet.erase(curClientID);
 	}
@@ -978,15 +1006,16 @@ private:
 	static inline SOCKET serverControlSocket = INVALID_SOCKET;
 	static inline SOCKET serverTransferSocket = INVALID_SOCKET;
 
-	mutex sessionIDToControlSocketMapMtx, sessionIDToTransferSocketMapMtx, sessionIDToNickNameMapMtx, sessionWaitingForTransferMtx, userNickNamesSetMtx, alreadyUsedSessionIDSetMtx;
+	mutex sessionIDToControlSocketMapMtx, sessionIDToTransferSocketMapMtx, sessionIDToNickNameMapMtx, sessionWaitingForTransferMtx, curLoginedUsersSetMtx, userNickNamesSetMtx, alreadyUsedSessionIDSetMtx;
 
 
 	static inline unordered_map<int, SOCKET> sessionIDToClientControlSocket;
 	static inline unordered_map<int, SOCKET> sessionIDToClientTransferSocket;
 	//static inline unordered_map<string, int> userNamesToSessionId;
-	static inline unordered_map<int, string> sessionIDToNickName;
+	static inline unordered_map<int, string> sessionIDToNickNameMap;
 
 	static inline unordered_set<int> sessionsWaitingForTransferConnection;
+	static inline unordered_set<string> curLoginedUsersNamesSet;
 	static inline unordered_set<string> userNickNamesSet;
 	static inline unordered_set<long long> alreadyUsedIDSet;
 
