@@ -789,7 +789,7 @@ private:
 	static inline const string kClientHandShakePhrase = "Hello server";
 	static inline const string kServerConfirmationPhrase = "OK";
 	static inline const string kCommandDelimiter		 = "||";
-	static inline const int	   kClientVersion			 = 1;
+	static inline const int	   kClientVersion			 = 2;
 	static inline const int	   kMaxRetryCounter			 = 4;
 	static inline const int	   kMaxFileNameSize			 = 15;
 	static inline const int    kMinFileNameSize			 = 1;
