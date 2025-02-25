@@ -1,6 +1,13 @@
 # Created by https://www.toptal.com/developers/gitignore/api/c++,windows,visualstudio
 # Edit at https://www.toptal.com/developers/gitignore?templates=c++,windows,visualstudio
 
+# For base64 library
+base64.cpp
+base64.h
+
+# For json library
+json.hpp
+
 ### C++ ###
 # Prerequisites
 *.d
