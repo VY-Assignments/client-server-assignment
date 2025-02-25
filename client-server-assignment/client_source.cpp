@@ -703,7 +703,7 @@ private:
 		}
 
 		const size_t kChunkSize = 1024, kFileSize = getFileSize(file);
-		int bytesRead = 0, totalRealBytesUploaded = 0;
+		size_t bytesRead = 0, totalRealBytesUploaded = 0;
 		
 		char buffer[kChunkSize]; 
 		memset(buffer, 0, sizeof(buffer));

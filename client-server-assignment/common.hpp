@@ -4,7 +4,7 @@
 
 namespace common
 {
-	enum class Command : int
+	enum class Command : size_t
 	{
 		kGet = 0,
 		kList,
@@ -15,7 +15,7 @@ namespace common
 		kExit
 	};
 
-	enum class StatusCode : int
+	enum class StatusCode : size_t
 	{
 		kStatusOK = 200,
 		kStatusNotFound = 404,
