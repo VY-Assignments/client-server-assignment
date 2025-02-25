@@ -1,4 +1,5 @@
 #pragma once
+
 #include <fstream>
 #include <string>
 
@@ -11,7 +12,7 @@ namespace common
 		kPut,
 		kDelete,
 		kInfo,
-		kDefault, 
+		kDefault,
 		kExit
 	};
 
@@ -35,17 +36,17 @@ namespace common
 
 	struct JsonFields
 	{
-		const std::string kMessage		 = "message";
-		const std::string kStatusCode	 = "statusCode";
-		const std::string kTransferPort	 = "transferPort";
-		const std::string kCommand		 = "command";
-		const std::string kArgument		 = "argument";
-		const std::string kVersion		 = "version";
-		const std::string kUniqueID		 = "uniqueID";
-		const std::string kFileSize		 = "fileSize";
-		const std::string kFileNames	 = "fileNames";
-		const std::string kFileInfo		 = "fileInfo";
-		const std::string kNickname		 = "nickname";
+		const std::string kMessage = "message";
+		const std::string kStatusCode = "statusCode";
+		const std::string kTransferPort = "transferPort";
+		const std::string kCommand = "command";
+		const std::string kArgument = "argument";
+		const std::string kVersion = "version";
+		const std::string kUniqueID = "uniqueID";
+		const std::string kFileSize = "fileSize";
+		const std::string kFileNames = "fileNames";
+		const std::string kFileInfo = "fileInfo";
+		const std::string kNickname = "nickname";
 		const std::string kUsersNicknames = "user_nicknames";
 	};
 }

@@ -26,5 +26,8 @@
     <ClInclude Include="..\client-server-assignment\json.hpp">
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
+    <ClInclude Include="..\client-server-assignment\common.hpp">
+      <Filter>Файлы заголовков</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

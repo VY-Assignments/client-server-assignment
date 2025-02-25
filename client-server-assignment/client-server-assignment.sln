@@ -10,6 +10,11 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "client", "client-server-ass
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "server", "..\server\server.vcxproj", "{B0A216D5-F32A-4E1F-8344-C1E9A65555C7}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "sharedHeaders", "sharedHeaders", "{F5A0DFD4-03E6-430D-9131-0D768439C06A}"
+	ProjectSection(SolutionItems) = preProject
+		common.hpp = common.hpp
+	EndProjectSection
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
