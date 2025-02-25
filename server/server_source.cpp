@@ -18,44 +18,12 @@
 #include <vector>  
 #include <string>
 #include <mutex>
+#include "..//client-server-assignment/common.hpp"
 
 
 #pragma comment(lib, "ws2_32.lib")
 using namespace std;
 
-namespace common
-{
-
-	enum class Command : int
-	{
-		kGet = 0,
-		kList,
-		kPut,
-		kDelete,
-		kInfo,
-		kDefault
-
-	};
-
-	enum class StatusCode : int
-	{
-		kStatusOK = 200,
-		kStatusNotFound = 404,
-		kStatusCreated = 201,
-		kStatusFailure = 500
-	};
-	
-	inline size_t getFileSize(std::ifstream& file)
-	{
-		std::streampos current = file.tellg();
-		file.seekg(0, std::ios::end);
-		size_t size = file.tellg();
-		file.seekg(current, std::ios::beg);
-
-		return size;
-	}
-
-}
 
 
 namespace server_utils
@@ -73,25 +41,8 @@ namespace server_utils
 		const string			 kNickname	   = "";
 		const common::Command	 kCommand	   = common::Command::kDefault;
 	};
-
-	
 }
 
-struct JsonFields
-{
-	const string kMessage		 = "message";
-	const string kStatusCode	 = "statusCode";
-	const string kTransferPort	 = "transferPort";
-	const string kCommand		 = "command";
-	const string kArgument		 = "argument";
-	const string kVersion		 = "version";
-	const string kUniqueID		 = "uniqueID";
-	const string kFileSize		 = "fileSize";
-	const string kFileNames		 = "fileNames";
-	const string kFileInfo		 = "fileInfo";
-	const string kNickname		 = "nickname";
-	const string kUsersNicknames = "user_nicknames";
-};
 
 vector<string> listDir(string directoryPath = ".")
 {
@@ -319,7 +270,7 @@ private:
 	}
 
 
-	void handleClient(const int curClientID)  // to DO: ADD DIRECTORY HANDLING, add recv() to while loop, 
+	void handleClient(const int curClientID)   
 	{
 		int bytesSent = 0, bytesReceived = 0, retryCounter = 0;
 		SOCKET clientControlSocket = INVALID_SOCKET, clientTransferSocket = INVALID_SOCKET;
@@ -744,7 +695,7 @@ private:
 
 		{
 			scoped_lock lock(sessionIDToNickNameMapMtx, userNickNamesSetMtx);
-			sessionIDToNickNameMap[uniqueID] = (responseJson.value(jsFields.kNickname, jsFieldsDefault.kNickname) == jsFieldsDefault.kNickname) ? kDefaultDir : string(responseJson[jsFields.kNickname]);
+			sessionIDToNickNameMap[uniqueID] = (responseJson.value(jsFields.kNickname, jsFieldsDefault.kNickname) == jsFieldsDefault.kNickname) ? kDefaultDir : string(responseJson.value(jsFields.kNickname, ""));
 			userNickNamesSet.insert(curNickName);
 		}
 		
@@ -980,7 +931,7 @@ private:
 	static inline const string kDefaultDir = "default";
 	static inline regex validFileNamePattern = basic_regex<char>(R"(^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+)?$)");
 	static inline chrono::seconds kTimeout{ 2 };
-	static inline const JsonFields jsFields;
+	static inline const common::JsonFields jsFields;
 	static inline const server_utils::DefaultJsonFields jsFieldsDefault;
 	static inline const string kServerHandShakePhrase = "Hello client";
 	static inline const string kClientHandShakePhrase = "Hello server";

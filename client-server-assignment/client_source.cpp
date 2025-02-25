@@ -1,4 +1,4 @@
-#include <iostream>
+﻿#include <iostream>
 #include <winsock2.h>
 #include <Ws2tcpip.h>
 #include <vector>
@@ -11,10 +11,11 @@
 #include <regex>
 #include <sstream>
 #include "json.hpp"
-#include "base64.h"
+#include "common.hpp"
 
 #pragma comment(lib, "ws2_32.lib")
-using namespace std;
+using namespace std; 
+using namespace common;
 
 static bool isEqual(const int result, const int expected)
 {
@@ -32,39 +33,8 @@ static void cleanUpResources(const vector<SOCKET> socketsToClose)
 	WSACleanup();
 }
 
-enum class Command : int
-{
-	kGet = 0,
-	kList,
-	kPut,
-	kDelete,
-	kInfo,
-	kExit,
-	kDefault
-};
 
-enum class StatusCode : int 
-{
-	kStatusOK		= 200,
-	kStatusNotFound = 404,
-	kStatusCreated  = 201, 
-	kStatusFailure  = 500
-};
 
-struct JsonFields 
-{
-	const string kMessage		= "message";
-	const string kStatusCode	= "statusCode";
-	const string kTransferPort  = "transferPort";
-	const string kCommand		= "command";
-	const string kArgument		= "argument";
-	const string kVersion		= "version";
-	const string kUniqueID		= "uniqueID";
-	const string kFileSize		= "fileSize";
-	const string kFileNames		= "fileNames";
-	const string kFileInfo		= "fileInfo";
-	const string kNickname		= "nickname";
-};
 
 
 class ClientTcp
@@ -596,14 +566,6 @@ public:
 private:
 	ClientTcp(const string clientName) : kClientName(clientName) {}
 
-	static inline const string encodeJsonToBase64(const nlohmann::json& jsObjectToEncode) 
-	{
-		return base64_encode(jsObjectToEncode.dump());
-	}
-	static inline const nlohmann::json decodeBase64ToJson(const string& strToDecode)
-	{
-		return nlohmann::json::parse(base64_decode(strToDecode));
-	}
 	static inline const size_t getFileSize(ifstream& file)  
 	{
 		streampos current = file.tellg();  
@@ -612,11 +574,6 @@ private:
 		file.seekg(current, std::ios::beg);     
 
 		return size;
-	}
-	static inline const string getDecodedCommandBeforeDelimiter(const char buffer[])
-	{
-		string decoded = base64_decode(buffer);
-		return decoded.substr(0, decoded.find(kCommandDelimiter));
 	}
 
 	static inline void printDirList(nlohmann::json listJsonIn) 
@@ -795,7 +752,7 @@ private:
 	static inline const int    kMinFileNameSize			 = 1;
 	static inline shared_ptr<ClientTcp>	thisClientPtr	 = nullptr;
 
-	static inline const JsonFields jsFields;
+	static inline const common::JsonFields jsFields;
 	const string kClientName;
 
 	
@@ -882,19 +839,19 @@ private:
 	Command handleCommand(const string& input)
 	{
 		
-		if (regex_match(input, putPattern))
+		if (regex_match(input, kPutPattern))
 			return Command::kPut;
 		
-		else if (regex_match(input, getPattern))
+		else if (regex_match(input, kGetPattern))
 			return Command::kGet;
 		
-		else if (regex_match(input, deletePattern))
+		else if (regex_match(input, kDeletePattern))
 			return Command::kDelete;
 		
-		else if (regex_match(input, infoPattern))
+		else if (regex_match(input, kInfoPattern))
 			return Command::kInfo;
 		
-		else if (regex_match(input, listPattern))
+		else if (regex_match(input, kListPattern))
 			return Command::kList;
 		
 		else if (input == "exit")
@@ -912,28 +869,28 @@ private:
 		case Command::kPut:
 		{
 			smatch match;
-			regex_search(input, match, regex(R"(^put\s+(.+)$)"));
+			regex_search(input, match, kPutPattern);
 			client->putFile(match[1]);
 			break;
 		}
 		case Command::kGet:
 		{
 			smatch match;
-			regex_search(input, match, regex(R"(^get\s+(.+)$)"));
+			regex_search(input, match, kGetPattern);
 			client->getFile(match[1]);
 			break;
 		}
 		case Command::kDelete:
 		{
 			smatch match;
-			regex_search(input, match, regex(R"(^delete\s+(.+)$)"));
+			regex_search(input, match, kDeletePattern);
 			client->deleteFileRemote(match[1]);
 			break;
 		}
 		case Command::kInfo:
 		{
 			smatch match;
-			regex_search(input, match, regex(R"(^info\s+(.+)$)"));
+			regex_search(input, match, kInfoPattern);
 			client->getFileInfo(match[1]);
 			break;
 		}
@@ -946,11 +903,11 @@ private:
 		}
 	}
 
-	static inline const regex putPattern = basic_regex<char>(R"(^put\s+(.+)$)");
-	static inline const regex getPattern = basic_regex<char>(R"(^get\s+(.+)$)");
-	static inline const regex deletePattern = basic_regex<char>(R"(^delete\s+(.+)$)");
-	static inline const regex infoPattern = basic_regex<char>(R"(^info\s+(.+)$)");
-	static inline const regex listPattern = basic_regex<char>(R"(^list\s*$)");
+	static inline const regex kPutPattern = basic_regex<char>(R"(^put\s+(.+)$)");
+	static inline const regex kGetPattern = basic_regex<char>(R"(^get\s+(.+)$)");
+	static inline const regex kDeletePattern = basic_regex<char>(R"(^delete\s+(.+)$)");
+	static inline const regex kInfoPattern = basic_regex<char>(R"(^info\s+(.+)$)");
+	static inline const regex kListPattern = basic_regex<char>(R"(^list\s*$)");
 
 };
 
@@ -958,39 +915,9 @@ private:
 
 int main()
 {
+
 	Program prog;
 	prog.start();
-
-
-
-
-
-	/*
-	auto result = ClientTcp::initClient();
-
-	shared_ptr<ClientTcp> ptr = result.value();
-
-	
-	ptr->initSocket();
-	if (ptr->tryConnectToServer(1234, L"127.0.0.1"))
-	{
-		cout << "SUCCESS, connected\n";
-	};
-	if (ptr->putFile("hello.txt"))
-	{
-		cout << "success put file\n";
-	}
-	if (ptr->putFile("me.jpg"))
-	{
-		cout << "success put file\n";
-	}
-	if (ptr->getFileInfo("me.jpg"))
-	{
-		cout << "success info\n";
-	
-	ptr->listCurDir();
-	ptr.~shared_ptr();
-	*/
 	_getch();
 
 	return 0;
