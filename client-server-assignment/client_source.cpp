@@ -11,7 +11,6 @@
 #include <regex>
 #include <sstream>
 #include "json.hpp"
-#include "base64.h"
 
 #pragma comment(lib, "ws2_32.lib")
 using namespace std;
@@ -39,8 +38,9 @@ enum class Command : int
 	kPut,
 	kDelete,
 	kInfo,
-	kExit,
-	kDefault
+	kDefault,
+	kExit
+
 };
 
 enum class StatusCode : int 
@@ -285,7 +285,16 @@ public:
 			return true;
 		}
 		
-		//return true;
+		string response = buffer;
+		responseJson = nlohmann::json::parse(response.substr(0, response.find(kCommandDelimiter)));
+		
+		if (responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure) != StatusCode::kStatusOK)
+		{
+			cerr << format("Error ar {}, the status code was {}\n", __func__, responseJson.value(jsFields.kStatusCode, "Unknown"));
+			return false;
+		}
+
+		return true;
 	}
 
 	bool getFile(string fileName)
@@ -576,7 +585,6 @@ public:
 		if (!responseJson.contains(jsFields.kStatusCode) || responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure) != StatusCode::kStatusOK)
 		{
 			cerr << format("Status code was {}, message: {}\n", responseJson.value(jsFields.kStatusCode, static_cast<int>(StatusCode::kStatusFailure)), responseJson.value(jsFields.kMessage, ""));
-			//dropAllConnections();
 			return false;
 		}
 
@@ -596,14 +604,7 @@ public:
 private:
 	ClientTcp(const string clientName) : kClientName(clientName) {}
 
-	static inline const string encodeJsonToBase64(const nlohmann::json& jsObjectToEncode) 
-	{
-		return base64_encode(jsObjectToEncode.dump());
-	}
-	static inline const nlohmann::json decodeBase64ToJson(const string& strToDecode)
-	{
-		return nlohmann::json::parse(base64_decode(strToDecode));
-	}
+
 	static inline const size_t getFileSize(ifstream& file)  
 	{
 		streampos current = file.tellg();  
@@ -613,11 +614,7 @@ private:
 
 		return size;
 	}
-	static inline const string getDecodedCommandBeforeDelimiter(const char buffer[])
-	{
-		string decoded = base64_decode(buffer);
-		return decoded.substr(0, decoded.find(kCommandDelimiter));
-	}
+
 
 	static inline void printDirList(nlohmann::json listJsonIn) 
 	{
@@ -629,7 +626,7 @@ private:
 			if (counter % 2 == 0)	cout << endl;
 		}
 
-		if (counter == 1) 
+		if (counter % 2 != 0)
 			cout << endl;
 	}
 	static inline void printFileInfo(const string& fileName, const nlohmann::json& fileInfo)
@@ -812,6 +809,144 @@ private:
 	friend class shared_ptr<ClientTcp>;
 };
 
+class Program
+{
+private:
+	shared_ptr<ClientTcp> client;
+
+public:
+	void start()
+	{
+		int port;
+		wstring serverIP;
+		string name;
+
+		cout << "Enter server IP: ";
+		wcin >> serverIP;
+		cout << "Enter server control port: ";
+		cin >> port;
+
+		auto clientOpt = ClientTcp::initClient();
+		if (!clientOpt)
+		{
+			cerr << "Failed to initialize client.\n";
+			return;
+		}
+		client = clientOpt.value();
+
+		if (!client->tryConnectToServer(port, serverIP.c_str()))
+		{
+			return;
+		}
+
+		string input;
+		getline(cin, input); // to get rid of \n
+
+		promptCommands();
+	}
+
+private:
+	void promptCommands()
+	{
+		string input;
+
+		while (true)
+		{
+			cout << "> ";
+			getline(cin, input);
+
+			input = input.substr(0, input.find('\n'));
+
+			Command command = handleCommand(input);
+			if (command == Command::kDefault)
+			{
+				cout << "Unknown command. Available commands: put, get, delete, info, list, exit.\n";
+				continue;
+			}
+
+			if (command == Command::kExit)
+				break;
+
+			executeCommand(command, input);
+		}
+	}
+
+	Command handleCommand(const string& input)
+	{
+
+		if (regex_match(input, putPattern))
+			return Command::kPut;
+
+		else if (regex_match(input, getPattern))
+			return Command::kGet;
+
+		else if (regex_match(input, deletePattern))
+			return Command::kDelete;
+
+		else if (regex_match(input, infoPattern))
+			return Command::kInfo;
+
+		else if (regex_match(input, listPattern))
+			return Command::kList;
+
+		else if (input == "exit")
+			return Command::kExit;  // Handle exit command
+
+
+		return Command::kDefault;  // Default for unrecognized commands
+	}
+
+	void executeCommand(const Command command, const string& input)
+	{
+
+		switch (command)
+		{
+		case Command::kPut:
+		{
+			smatch match;
+			regex_search(input, match, regex(R"(^put\s+(.+)$)"));
+			client->putFile(match[1]);
+			break;
+		}
+		case Command::kGet:
+		{
+			smatch match;
+			regex_search(input, match, regex(R"(^get\s+(.+)$)"));
+			client->getFile(match[1]);
+			break;
+		}
+		case Command::kDelete:
+		{
+			smatch match;
+			regex_search(input, match, regex(R"(^delete\s+(.+)$)"));
+			client->deleteFileRemote(match[1]);
+			break;
+		}
+		case Command::kInfo:
+		{
+			smatch match;
+			regex_search(input, match, regex(R"(^info\s+(.+)$)"));
+			client->getFileInfo(match[1]);
+			break;
+		}
+		case Command::kList:
+			client->listCurDir();
+			break;
+		default:
+			cout << "Invalid command.\n";
+			break;
+		}
+	}
+
+	static inline const regex putPattern = basic_regex<char>(R"(^put\s+(.+)$)");
+	static inline const regex getPattern = basic_regex<char>(R"(^get\s+(.+)$)");
+	static inline const regex deletePattern = basic_regex<char>(R"(^delete\s+(.+)$)");
+	static inline const regex infoPattern = basic_regex<char>(R"(^info\s+(.+)$)");
+	static inline const regex listPattern = basic_regex<char>(R"(^list\s*$)");
+
+};
+
+
 
 
 
@@ -961,40 +1096,5 @@ int main()
 	Program prog;
 	prog.start();
 
-
-
-
-
-	/*
-	auto result = ClientTcp::initClient();
-
-	shared_ptr<ClientTcp> ptr = result.value();
-
-	
-	ptr->initSocket();
-	if (ptr->tryConnectToServer(1234, L"127.0.0.1"))
-	{
-		cout << "SUCCESS, connected\n";
-	};
-	if (ptr->putFile("hello.txt"))
-	{
-		cout << "success put file\n";
-	}
-	if (ptr->putFile("me.jpg"))
-	{
-		cout << "success put file\n";
-	}
-	if (ptr->getFileInfo("me.jpg"))
-	{
-		cout << "success info\n";
-	
-	ptr->listCurDir();
-	ptr.~shared_ptr();
-	*/
-	_getch();
-
 	return 0;
-
 }
-
-
