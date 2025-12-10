@@ -9,6 +9,7 @@
 #include <thread>
 #include <fstream>
 #include <regex>
+#include <sstream>
 #include "json.hpp"
 
 #pragma comment(lib, "ws2_32.lib")
@@ -44,10 +45,10 @@ enum class Command : int
 
 enum class StatusCode : int 
 {
-	kStatusOK = 200,
+	kStatusOK		= 200,
 	kStatusNotFound = 404,
-	kStatusCreated = 201, 
-	kStatusFailure = 500
+	kStatusCreated  = 201, 
+	kStatusFailure  = 500
 };
 
 struct JsonFields 
@@ -62,6 +63,7 @@ struct JsonFields
 	const string kFileSize		= "fileSize";
 	const string kFileNames		= "fileNames";
 	const string kFileInfo		= "fileInfo";
+	const string kNickname		= "nickname";
 };
 
 
@@ -69,7 +71,7 @@ class ClientTcp
 {
 public:
 
-	static optional<shared_ptr<ClientTcp>> initClient()
+	static optional<shared_ptr<ClientTcp>> initClient(const string clientName)
 	{
 		if (thisClientPtr != nullptr)
 		{
@@ -89,7 +91,7 @@ public:
 		}
 
 		isLibLoaded = true;
-		thisClientPtr = shared_ptr<ClientTcp>(new ClientTcp());
+		thisClientPtr = shared_ptr<ClientTcp>(new ClientTcp(clientName));
 
 		return thisClientPtr;
 	}
@@ -107,7 +109,7 @@ public:
 		return true;
 	}
 	
-	bool tryConnectToServer(const int serverControlPort, const PCWSTR serverIP) noexcept  // extend it so it would also init the additional server socket
+	bool tryConnectToServer(const int serverControlPort, const PCWSTR serverIP) noexcept  
 	{
 		if (isConnected)
 		{
@@ -137,7 +139,7 @@ public:
 		
 		if (!tryHandShake())
 		{
-			cerr << format("Error at {}, server does not follow handshake\n", __func__);
+			cerr << format("Error at {}, server does not follow handshake or the NickName is curently used\n", __func__);
 			isConnected = false;
 			dropAllConnections();
 			return false;
@@ -172,6 +174,7 @@ public:
 		nlohmann::json responseJson, requestJson = getClientJsonTemplate();
 		requestJson[jsFields.kMessage] = kClientHandShakePhrase;
 		requestJson[jsFields.kVersion] = kClientVersion;
+		requestJson[jsFields.kNickname] = kClientName;
 
 		string requestStr = requestJson.dump() + kCommandDelimiter;
 		
@@ -182,8 +185,8 @@ public:
 			
 			if (bytesReceived == 0)
 			{
-				dropAllConnections();
 				cout << format("Error at {}, server dropped connection\n", __func__);
+				dropAllConnections();
 				return false;
 			}
 			
@@ -236,26 +239,50 @@ public:
 		serverAddr.sin_port = htons(serverTransferPort);
 		InetPton(AF_INET, serverIP, &serverAddr.sin_addr);
 
-		while (connect(clientTransferSocket, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR && retryCounter <= kMaxRetryCounter)
+		while (retryCounter < kMaxRetryCounter)
 		{
-			cerr << format("Error at {}, connection to transfer port failed with error: {}, Retrying...\n", __func__, WSAGetLastError());
-			this_thread::sleep_for(100ms);	
-			retryCounter++;
-			if (retryCounter == kMaxRetryCounter)
+			if (connect(clientTransferSocket, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR && retryCounter <= kMaxRetryCounter)
 			{
+				cerr << format("Error at {}, connection to transfer port failed with error: {}, Retrying...\n", __func__, WSAGetLastError());
+				this_thread::sleep_for(100ms);
+				retryCounter++;
+				if (retryCounter == kMaxRetryCounter)
+				{
+					dropAllConnections();
+					return false;
+				}
+				continue;
+			}
+
+			send(clientTransferSocket, requestStr.c_str(), requestStr.size(), 0);
+
+			bytesReceived = recv(clientTransferSocket, buffer, (int)sizeof(buffer) - 1, 0);
+
+			if (bytesReceived == 0)
+			{
+				cerr << format("Error at {}, problem connecting to server transfer port\n", __func__);
+				
+				retryCounter++;
+				if (retryCounter < kMaxRetryCounter)
+				{
+					cerr << "Trying to reconnect to server transfer port...\n";
+					this_thread::sleep_for(100ms);
+					closesocket(clientTransferSocket);
+					continue;
+				}
+				dropAllConnections();
 				return false;
 			}
-		}
 
-		send(clientTransferSocket, requestStr.c_str(), requestStr.size(), 0);
+			string response = buffer;
+			responseJson = nlohmann::json::parse(response.substr(0, response.find(kCommandDelimiter)));
 
-		bytesReceived = recv(clientTransferSocket, buffer, (int)sizeof(buffer) - 1, 0); 
-
-		if(bytesReceived == 0)
-		{
-			cerr << format("Error at {}, received 0 bytes, closing connection\n", __func__);
-			dropAllConnections();
-			return false;
+			if (responseJson.value(jsFields.kStatusCode, StatusCode::kStatusFailure) != StatusCode::kStatusOK)
+			{
+				cerr << format("Error ar {}, the status code was {}\n", __func__, responseJson.value(jsFields.kStatusCode, "Unknown"));
+				return false;
+			}
+			return true;
 		}
 		
 		string response = buffer;
@@ -284,7 +311,7 @@ public:
 			return false;
 		}
 
-		char buffer[1024];
+		char buffer[2024];
 		memset(buffer, 0, sizeof(buffer));
 
 		nlohmann::json responseJson, requestJson = getClientJsonTemplate();
@@ -394,7 +421,7 @@ public:
 			cout << format("File {} not found on server\n", fileName);
 			return false;
 		default:
-			cerr << format("Error at {}, status code was {}\n", __func__, string(responseJson[jsFields.kStatusCode]));
+			cerr << format("Error at {}, status code was {}\n", __func__, responseJson.value(jsFields.kStatusCode, static_cast<int>(StatusCode::kStatusFailure)));
 			break;
 		}
 
@@ -508,7 +535,7 @@ public:
 		
 		if (!responseJson.contains(jsFields.kStatusCode) || !responseJson.contains(jsFields.kFileSize))
 		{
-			cerr << format("Error at {}, status code was {}", __func__, responseJson.value(jsFields.kStatusCode, static_cast<int>(StatusCode::kStatusFailure)));
+			cerr << format("Error at {}, status code was {}\n", __func__, responseJson.value(jsFields.kStatusCode, static_cast<int>(StatusCode::kStatusFailure)));
 			return false;
 		}
 		
@@ -575,7 +602,7 @@ public:
 		}
 	}
 private:
-	ClientTcp() {}
+	ClientTcp(const string clientName) : kClientName(clientName) {}
 
 
 	static inline const size_t getFileSize(ifstream& file)  
@@ -598,6 +625,7 @@ private:
 			cout << fileName << "\t";
 			if (counter % 2 == 0)	cout << endl;
 		}
+
 		if (counter % 2 != 0)
 			cout << endl;
 	}
@@ -758,15 +786,14 @@ private:
 	static inline const string kClientHandShakePhrase = "Hello server";
 	static inline const string kServerConfirmationPhrase = "OK";
 	static inline const string kCommandDelimiter		 = "||";
-	static inline const int	   kClientVersion			 = 1;
+	static inline const int	   kClientVersion			 = 2;
 	static inline const int	   kMaxRetryCounter			 = 4;
 	static inline const int	   kMaxFileNameSize			 = 15;
 	static inline const int    kMinFileNameSize			 = 1;
 	static inline shared_ptr<ClientTcp>	thisClientPtr	 = nullptr;
 
-
 	static inline const JsonFields jsFields;
-
+	const string kClientName;
 
 	
 
@@ -922,39 +949,152 @@ private:
 
 
 
+
+class Program
+{
+private:
+	shared_ptr<ClientTcp> client;
+
+public:
+	void start()
+	{
+		int port;
+		wstring serverIP;
+		string name;
+
+		cout << "Enter server IP: ";
+		wcin >> serverIP;
+		cout << "Enter the name: ";
+		cin >> name;
+		cout << "Enter server control port: ";
+		cin >> port;
+
+		auto clientOpt = ClientTcp::initClient(name);
+		if (!clientOpt)
+		{
+			cerr << "Failed to initialize client.\n";
+			return;
+		}
+		client = clientOpt.value();
+
+		if (!client->tryConnectToServer(port, serverIP.c_str()))
+		{
+			return;
+		}
+
+		string input;
+		getline(cin, input); // to get rid of \n
+
+		promptCommands();
+	}
+
+private:
+	void promptCommands()
+	{
+		string input;
+
+		while (true)
+		{
+			cout << "> ";
+			getline(cin, input);
+			
+			input = input.substr(0, input.find('\n'));
+
+			Command command = handleCommand(input);
+			if (command == Command::kDefault)
+			{
+				cout << "Unknown command. Available commands: put, get, delete, info, list, exit.\n";
+				continue;
+			}
+
+			if (command == Command::kExit)  
+				break;
+
+			executeCommand(command, input);
+		}
+	}
+
+	Command handleCommand(const string& input)
+	{
+		
+		if (regex_match(input, putPattern))
+			return Command::kPut;
+		
+		else if (regex_match(input, getPattern))
+			return Command::kGet;
+		
+		else if (regex_match(input, deletePattern))
+			return Command::kDelete;
+		
+		else if (regex_match(input, infoPattern))
+			return Command::kInfo;
+		
+		else if (regex_match(input, listPattern))
+			return Command::kList;
+		
+		else if (input == "exit")
+			return Command::kExit;  // Handle exit command
+		
+
+		return Command::kDefault;  // Default for unrecognized commands
+	}
+
+	void executeCommand(const Command command, const string& input)
+	{
+		
+		switch (command)
+		{
+		case Command::kPut:
+		{
+			smatch match;
+			regex_search(input, match, regex(R"(^put\s+(.+)$)"));
+			client->putFile(match[1]);
+			break;
+		}
+		case Command::kGet:
+		{
+			smatch match;
+			regex_search(input, match, regex(R"(^get\s+(.+)$)"));
+			client->getFile(match[1]);
+			break;
+		}
+		case Command::kDelete:
+		{
+			smatch match;
+			regex_search(input, match, regex(R"(^delete\s+(.+)$)"));
+			client->deleteFileRemote(match[1]);
+			break;
+		}
+		case Command::kInfo:
+		{
+			smatch match;
+			regex_search(input, match, regex(R"(^info\s+(.+)$)"));
+			client->getFileInfo(match[1]);
+			break;
+		}
+		case Command::kList:
+			client->listCurDir();
+			break;
+		default:
+			cout << "Invalid command.\n";
+			break;
+		}
+	}
+
+	static inline const regex putPattern = basic_regex<char>(R"(^put\s+(.+)$)");
+	static inline const regex getPattern = basic_regex<char>(R"(^get\s+(.+)$)");
+	static inline const regex deletePattern = basic_regex<char>(R"(^delete\s+(.+)$)");
+	static inline const regex infoPattern = basic_regex<char>(R"(^info\s+(.+)$)");
+	static inline const regex listPattern = basic_regex<char>(R"(^list\s*$)");
+
+};
+
+
+
 int main()
 {
-
 	Program prog;
 	prog.start();
 
-
-	/*
-	auto result = ClientTcp::initClient();
-
-	shared_ptr<ClientTcp> ptr = result.value();
-
-	ptr->initSocket();
-	if (ptr->tryConnectToServer(1234, L"127.0.0.1"))
-	{
-		cout << "SUCCESS, connected\n";
-	};
-	if (ptr->putFile("abab.jpg"))
-	{
-		cout << "success put file\n";
-	}
-	if (ptr->getFileInfo("abab.jpg"))
-	{
-		cout << "success info\n";
-	}
-	
-	// ptr->listCurDir();
-	ptr.~shared_ptr();
-	*/
-
-
 	return 0;
-
 }
-
-
