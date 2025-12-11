@@ -1,8 +1,8 @@
 # WinAPI File Transfer System
 
-A high-performance Client-Server application engineered in C++ (C++20) using the Windows Sockets API (WinSock2). This project demonstrates advanced systems programming concepts, specifically **multithreading**, **socket synchronization**, and **custom application-layer protocols**.
+A high-performance Client-Server application (C++20) using the Windows Sockets API (WinSock2). The purpose of the project was to get hold of **multithreading**, **socket synchronization**, and **custom application-layer protocols**.
 
-The system utilizes a unique **Dual-Socket Architecture**: distinct TCP connections are maintained for control signals (JSON) and data transmission (Binary), ensuring that large file transfers never block command execution.
+The system utilizes a **Dual-Socket Architecture**: distinct TCP connections are maintained for control signals (JSON) and data transmission (Binary), ensuring that large file transfers never block command execution.
 
 ### Features
 
